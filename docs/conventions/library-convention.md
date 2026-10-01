@@ -159,42 +159,41 @@ Unnecessary fragmentation shall be avoided.
 
 In particular, resistor and capacitor footprints shall **not** be divided into separate SMD and THT libraries.
 
-Recommended organization:
+Recommended repository organization:
 
 ```text
-libraries/
-├── symbols/
-│   ├── Passives.SchLib
-│   ├── Diodes.SchLib
-│   ├── Transistors.SchLib
-│   ├── Analog.SchLib
-│   ├── Digital.SchLib
-│   ├── MCU.SchLib
-│   ├── Memory.SchLib
-│   ├── Sensors.SchLib
-│   ├── Connectors.SchLib
-│   ├── Electromechanical.SchLib
-│   └── Modules.SchLib
-│
-└── footprints/
-    ├── Resistors.PcbLib
-    ├── Capacitors.PcbLib
-    ├── Inductors.PcbLib
-    ├── Diodes.PcbLib
-    ├── Transistors.PcbLib
-    ├── SOIC.PcbLib
-    ├── TSSOP.PcbLib
-    ├── QFN.PcbLib
-    ├── QFP.PcbLib
-    ├── BGA.PcbLib
-    ├── Connectors.PcbLib
-    ├── Modules.PcbLib
-    └── Mechanical.PcbLib
+symbols/
+├── Passives.SchLib
+├── Diodes.SchLib
+├── Transistors.SchLib
+├── Analog.SchLib
+├── Digital.SchLib
+├── MCU.SchLib
+├── Memory.SchLib
+├── Sensors.SchLib
+├── Connectors.SchLib
+├── Electromechanical.SchLib
+└── Modules.SchLib
+
+footprints/
+├── Resistors.PcbLib
+├── Capacitors.PcbLib
+├── Inductors.PcbLib
+├── Diodes.PcbLib
+├── Transistors.PcbLib
+├── SOIC.PcbLib
+├── TSSOP.PcbLib
+├── QFN.PcbLib
+├── QFP.PcbLib
+├── BGA.PcbLib
+├── Connectors.PcbLib
+├── Modules.PcbLib
+└── Mechanical.PcbLib
 ```
 
 The exact library split may evolve as the number of components grows.
 
-Moving a symbol or footprint between library files shall not require changing its canonical name.
+Moving a symbol or footprint between library files does not require changing its canonical model name, but it does require updating the library-qualified `Altium Symbol` or `Altium Footprint` reference in InvenTree.
 
 ---
 
@@ -678,80 +677,86 @@ The same rule applies to symbol names unless explicitly documented otherwise.
 
 # 15. InvenTree Integration
 
-InvenTree shall reference a symbol or footprint by its canonical name, not by the library filename.
-
-Recommended parameters include:
+InvenTree shall store Altium model references using the library-qualified parameters:
 
 ```text
-Symbol
-Footprint
+Altium Symbol
+Altium Footprint
 Package
+```
+
+Recommended value format:
+
+```text
+Altium Symbol    = <SchLib basename>:<symbol name>
+Altium Footprint = <PcbLib basename>:<footprint name>
 ```
 
 Example:
 
 ```text
-Symbol:
-Resistor
+Altium Symbol:
+Passives:Resistor
 
 Package:
 0603
 
-Footprint:
-RES_0603_H0.55
+Altium Footprint:
+Resistors:RES_0603_H0.55
 ```
 
 For a capacitor:
 
 ```text
-Symbol:
-Capacitor
+Altium Symbol:
+Passives:Capacitor
 
 Package:
 0603
 
-Footprint:
-CAP_0603_H0.90
+Altium Footprint:
+Capacitors:CAP_0603_H0.90
 ```
+
+The preferred stored form omits the `.SchLib` / `.PcbLib` extension. `inventree-sync` may also accept explicit extensions as defined by its architecture document.
 
 The following relationship shall be maintained:
 
 ```text
-Package != Footprint
+Package != Altium Footprint
 ```
 
 `Package` is a classification or manufacturer package designation.
 
-`Footprint` identifies the actual PCB library model.
+`Altium Footprint` identifies both the PCB library file and the canonical footprint model.
 
-Several InvenTree parts may reference the same symbol and footprint.
+Several InvenTree Parts may reference the same symbol and footprint.
 
 ---
 
-# 16. Library File Names Shall Not Be Stored as Component Identity
+# 16. Library-Qualified Model References
 
-InvenTree shall not depend on the physical `.SchLib` or `.PcbLib` file containing the model.
+Library filenames are not part of the IPN or engineering identity of a component, but the library containing an Altium model is part of the EDA reference required by `inventree-sync`.
 
-Prefer:
+Use:
+
+```text
+Altium Symbol = Passives:Resistor
+Altium Footprint = Resistors:RES_0603_H0.55
+```
+
+Do not use legacy unqualified references such as:
 
 ```text
 Symbol = Resistor
 Footprint = RES_0603_H0.55
 ```
 
-rather than:
+`inventree-sync` does not scan all libraries to infer the library file from a canonical model name.
 
-```text
-SymbolLibrary = Passives.SchLib
-Symbol = Resistor
+If a model is moved between library files, its canonical model name may remain unchanged, but every affected `Altium Symbol` or `Altium Footprint` value in InvenTree must be updated to reference the new library.
 
-FootprintLibrary = Resistors.PcbLib
-Footprint = RES_0603_H0.55
-```
-
-The synchronization script shall resolve canonical names to their current library files.
-
-This allows models to be moved between libraries without modifying InvenTree parts.
+The library portion is a basename, not a filesystem path. Filesystem paths used by DbLib are derived by the synchronization program from the repository library directories.
 
 ---
 
@@ -904,13 +909,14 @@ The library validation script should eventually verify at least the following:
 3. Symbol names are globally unique.
 4. Footprint names are globally unique.
 5. Referenced 3D models exist.
-6. InvenTree `Symbol` values resolve to an existing symbol.
-7. InvenTree `Footprint` values resolve to an existing footprint.
-8. Duplicate models across library files are detected.
-9. Decimal values use `.` rather than `,`.
-10. Invalid filesystem characters are rejected.
-11. Library file names follow the defined convention.
-12. References remain valid after moving models between library files.
+6. InvenTree `Altium Symbol` references use the required `library:model` format.
+7. InvenTree `Altium Footprint` references use the required `library:model` format.
+8. Referenced library files exist.
+9. Duplicate canonical models across library files are detected when library indexing is available.
+10. Decimal values use `.` rather than `,`.
+11. Invalid filesystem characters are rejected.
+12. Library file names follow the defined convention.
+13. Moving a model between library files requires updating affected InvenTree Altium references.
 
 ---
 

@@ -64,18 +64,16 @@ InvenTree is the single source of truth for component-library data.
 
 The following information must be obtained dynamically from InvenTree where required by the synchronization process:
 
-- component categories;
-- category hierarchy;
+- component categories and category hierarchy;
 - Parts;
 - Part IPNs;
-- parameter templates;
-- category parameter assignments;
-- Part parameter values;
-- parameter units;
-- parameter choice lists;
+- actual parameters attached to each Part;
+- parameter templates and their metadata;
 - other InvenTree metadata required by the synchronization architecture.
 
-Do not duplicate this data in repository configuration files.
+InvenTree itself is responsible for category parameter assignment and inheritance. When a Part is created, the concrete Part exposes the parameters that apply to it, including parameters inherited from higher-level categories. `inventree-sync` must consume those actual Part parameters and must not reconstruct category-parameter inheritance locally.
+
+Do not duplicate component data in repository configuration files.
 
 In particular, do not create local configuration files containing hard-coded copies of:
 
@@ -148,31 +146,35 @@ If the architecture document specifies a module responsibility, keep that respon
 
 ## 6. Dynamic schema generation
 
-The database schema must be derived from actual InvenTree data according to the architecture.
+The database schema must be derived from the actual parameters of exported InvenTree Parts.
 
-The program must determine:
+Only a leaf category containing at least one exported Part produces an Access component table.
+
+For each exported leaf category, the program must determine:
 
 ```text
-InvenTree category tree
+leaf category
         ->
-leaf categories
+exported Parts in that category
         ->
-category parameter assignments
+actual parameters of all Parts
         ->
-inherited parameter templates
-        ->
-actual Part parameters
+union of referenced parameter templates
         ->
 effective table schema
 ```
 
+InvenTree already applies parameters inherited from higher-level categories to the concrete Part. `inventree-sync` must therefore read the parameters that actually exist on each Part and must not reconstruct category inheritance.
+
+Do not use category parameter assignments or a locally maintained category schema to determine columns.
+
+An empty leaf category produces no Access table and does not require schema discovery.
+
+If a parameter exists on at least one Part in the category, it belongs to the table schema. Parts which do not contain that parameter receive SQL `NULL` for that column.
+
 Do not hard-code the expected schema of categories such as Resistors, Capacitors, Inductors, or Transformers in Python or TOML merely to reproduce the current InvenTree state.
 
-For an empty leaf category, its schema must be derivable from its category parameter assignments and inherited assignments.
-
-For a non-empty leaf category, the effective schema may additionally incorporate the union of actual Part parameters as defined by the architecture.
-
-Adding a valid parameter assignment in InvenTree should not normally require a source-code or configuration change.
+Adding, removing, or changing actual Part parameters in InvenTree should be reflected by the next synchronization without modifying repository configuration.
 
 ---
 
@@ -191,7 +193,7 @@ Examples include:
 - Stock Items do not create component rows;
 - Supplier Parts do not create component rows;
 - Manufacturer Parts do not create component rows;
-- one leaf InvenTree category maps to one Access component table;
+- one non-empty exported leaf InvenTree category maps to one Access component table;
 - the table name is exactly the leaf category name;
 - invalid table names are validation errors and are not automatically rewritten.
 
@@ -464,7 +466,7 @@ API fixtures must be:
 
 Prefer several small focused fixtures over large raw dumps of the production InvenTree database.
 
-Fixtures should cover edge cases such as pagination, missing values, empty categories, inherited parameters, malformed references, and API errors where relevant.
+Fixtures should cover edge cases such as pagination, missing values, empty leaf categories being ignored, Parts with different parameter sets, malformed references, and API errors where relevant.
 
 ---
 

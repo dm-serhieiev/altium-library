@@ -1365,17 +1365,17 @@ IPN не повинен містити:
 - назву KiCad Symbol;
 - назву KiCad Footprint.
 
-Наприклад:
+EDA-ідентифікатори зберігаються окремими параметрами InvenTree. Для Altium використовується library-qualified формат, визначений архітектурою `inventree-sync`:
 
 ```text
 IPN:
 RES-10K-1%-0603
 
 Altium Symbol:
-Resistor
+Passives:Resistor
 
 Altium Footprint:
-RES_0603_H0.55
+Resistors:RES_0603_H0.55
 
 KiCad Symbol:
 Device:R
@@ -1386,7 +1386,7 @@ Resistor_SMD:R_0603_1608Metric
 
 Ці ідентифікатори є незалежними від IPN та можуть змінюватися без зміни самого IPN.
 
-Поле `Package` також не є заміною поля `Footprint`.
+Поле `Package` також не є заміною поля `Altium Footprint`.
 
 Наприклад:
 
@@ -1394,8 +1394,8 @@ Resistor_SMD:R_0603_1608Metric
 Package:
 0603
 
-Footprint:
-RES_0603_H0.55
+Altium Footprint:
+Resistors:RES_0603_H0.55
 ```
 
 Різні компоненти з однаковим `Package` можуть використовувати різні посадкові місця, якщо цього потребує їх механічна реалізація.

@@ -1,0 +1,12 @@
+# Milestone 1A: read layer only. No component data or credentials belong here.
+[inventree]
+base_url = "https://inventree.example.com"
+auth = "token"
+token_env = "INVENTREE_API_TOKEN"
+connect_timeout = 10
+read_timeout = 60
+retries = 3
+
+[scope]
+root_category_path = ["Electronic Components"]
+

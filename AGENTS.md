@@ -93,8 +93,16 @@ Changes made in InvenTree should be reflected by synchronization without requiri
 Synchronization is strictly one-way:
 
 ```text
-InvenTree -> Microsoft Access -> Altium DbLib
+InvenTree -> prepared logical tables -> generated database -> Altium DbLib
 ```
+
+Milestone 1C introduces database-independent `PreparedTables`. The eventual
+Access-versus-SQLite backend decision is open; the previous Access design is
+retained in the architecture as the proposed Access backend. Access-specific
+instructions below apply if that backend is implemented. The logical stage
+must not generate SQL or database files, and must preserve existing project
+identifier conventions. `inspect` remains the Milestone 1B read-only command;
+`prepare_tables(dataset, layout)` is a separate Python API.
 
 `inventree-sync` must never modify InvenTree.
 

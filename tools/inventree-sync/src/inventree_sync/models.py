@@ -1,6 +1,7 @@
 """Minimal immutable models, independent of transport field names."""
 
 from dataclasses import dataclass
+from typing import Literal, Mapping
 
 
 @dataclass(frozen=True, slots=True)
@@ -46,4 +47,47 @@ class PartWithParameters:
     def pk(self) -> int:
         """Let the existing paginator detect repeated Part primary keys."""
         return self.part.pk
+
+
+ModelKind = Literal["symbol", "footprint"]
+
+
+@dataclass(frozen=True, slots=True)
+class ModelRef:
+    kind: ModelKind
+    library_filename: str
+    model_name: str
+
+
+@dataclass(frozen=True, slots=True)
+class ColumnDefinition:
+    name: str
+    template_pk: int | None  # None identifies a generated technical column.
+
+
+TECHNICAL_COLUMNS = tuple(ColumnDefinition(name, None) for name in (
+    "IPN", "Library Ref", "Library Path", "Footprint Ref", "Footprint Path",
+))
+
+
+@dataclass(frozen=True, slots=True)
+class TableSchema:
+    category_pk: int
+    name: str
+    category_path: str
+    columns: tuple[ColumnDefinition, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class PreparedTable:
+    category_pk: int
+    name: str
+    category_path: str
+    columns: tuple[ColumnDefinition, ...]
+    rows: tuple[Mapping[str, str | None], ...]
+
+
+@dataclass(frozen=True, slots=True)
+class PreparedTables:
+    tables: tuple[PreparedTable, ...]
 

@@ -1,8 +1,10 @@
-# Архітектура inventree-sync: InvenTree → Microsoft Access → Altium DbLib
+# Архітектура inventree-sync: InvenTree → таблиці компонентів → Altium DbLib
 
-Статус: Milestone 1A реалізував основу й API-клієнт; Milestone 1B додає читання вибраного піддерева та команду `inspect`. Генерація схеми Access, Altium-перетворення й публікація ACCDB залишаються запланованими етапами.
+Статус: Milestone 1A реалізував основу й API-клієнт; Milestone 1B — читання вибраного піддерева та команду `inspect`; Milestone 1C — динамічні логічні схеми, Altium-перетворення й перевірені таблиці в пам'яті. Запис бази даних і налаштування DbLib залишаються наступними етапами.
 
-Назва програми та console command — `inventree-sync`, назва Python-пакета — `inventree_sync`. Синхронізація одностороння: InvenTree є джерелом істини, файл Microsoft Access `.accdb` — відтворюваною проміжною базою для Altium DbLib. Скрипт читає InvenTree і не змінює його категорії або компоненти.
+Назва програми та console command — `inventree-sync`, назва Python-пакета — `inventree_sync`. Синхронізація одностороння: InvenTree є джерелом істини, згенерована база — відтворюваним проміжним артефактом для Altium DbLib. Скрипт читає InvenTree і не змінює його категорії або компоненти.
+
+Історичний вибір Microsoft Access `.accdb` і проєкт його безпечного запису збережено нижче. Завдання Milestone 1C повторно відкриває вибір **Access або SQLite**: шар `PreparedDataset → PreparedTables` незалежний від backend. SQL, типи й ліміти сховища, драйвери та публікація належать майбутньому writer. Наявні конвенції назв таблиць і полів залишаються чинними для обох варіантів; рішення щодо SQLite writer або його сумісності з Altium ще не прийнято.
 
 ## 1. Контракт і джерела правил
 
@@ -14,7 +16,7 @@ InvenTree є єдиним джерелом істини для дерева ка
 
 Для Altium використовуємо саме `Altium Symbol = бібліотека:символ` і `Altium Footprint = бібліотека:посадкове_місце`. Старі назви `Symbol`/`Footprint` та значення без бібліотеки автоматично не підставляються. Переміщення моделі між файлами потребує оновлення відповідного параметра в InvenTree.
 
-- Одна leaf-категорія, що містить хоча б один експортований InvenTree Part, → одна користувацька таблиця Access. Порожні leaf-категорії ігноруються і таблиць не створюють.
+- Одна leaf-категорія, що містить хоча б один експортований InvenTree Part, → одна логічна таблиця компонентів. Порожні leaf-категорії ігноруються і таблиць не створюють.
 - Назва таблиці точно дорівнює `category.name`, без aliases, префіксів і суфіксів.
 - Один InvenTree Part → один рядок. Stock Item, Supplier Part і Manufacturer Part не створюють додаткових рядків.
 - `Part.IPN` → колонка `IPN`, ключ і назва компонента у базі Altium. `Part.name` не використовується як заміна.
@@ -40,26 +42,28 @@ tools/inventree-sync/
 │   ├── config.py          # TOML, env, перевірка конфігурації
 │   ├── api.py             # HTTP, auth, timeout, retry, pagination
 │   ├── adapters.py        # особливості версій REST API
-│   ├── models.py          # Category, Part, ParameterTemplate, Parameter, PartWithParameters
+│   ├── models.py          # моделі InvenTree, ModelRef, ColumnDefinition, TableSchema, PreparedTables
 │   ├── categories.py      # дерево, scope, листки, перевірка назв таблиць
 │   ├── retrieval.py       # retrieve_dataset, PreparedDataset, спільні індекси
-│   ├── schema.py          # union фактичних Part parameters → колонки
-│   ├── transform.py       # параметри → рядок, розбір Altium refs
-│   ├── validate.py        # цілісність, дублікати, правила експорту
-│   ├── access.py          # ODBC, DDL, параметризований запис і перевірка ACCDB
-│   ├── report.py          # JSON-звіт і маніфест категорій/полів
-│   └── pipeline.py        # послідовність експорту
+│   ├── schema.py          # build_table_schemas: union фактичних параметрів → логічні колонки
+│   ├── transform.py       # parse_model_ref, LibraryLayout, prepare_tables
+│   ├── validate.py        # логічна перевірка колонок, посилань і рядків
+│   ├── access.py          # запланований варіант Access writer; ще не реалізований
+│   ├── report.py          # майбутній JSON-звіт і маніфест
+│   └── pipeline.py        # майбутня послідовність повного експорту
 └── tests/
     ├── fixtures/          # знеособлені відповіді підтримуваних API
     ├── test_api.py
     ├── test_categories.py
     ├── test_retrieval.py
     ├── test_cli.py
+    ├── test_schema.py
     ├── test_transform.py
-    └── test_sync.py
+    ├── test_validate.py
+    └── test_sync.py       # майбутні тести запису/публікації
 ```
 
-Залежності: Python 3.11+ (`tomllib`, `dataclasses`, `argparse`, `pathlib`, `logging`), `requests` для HTTP, `pyodbc` для Access, `pytest` для тестування. Цільове середовище запису — Windows із драйвером Microsoft Access Database Engine відповідної розрядності. Версії залежностей фіксуються після перевірки реалізації.
+Залежності: Python 3.11+ (`tomllib`, `dataclasses`, `argparse`, `pathlib`, `logging`), `requests` для HTTP, `pytest` для тестування; поточні версії зафіксовані в `pyproject.toml`. Milestone 1C не додає залежностей і не імпортує `sqlite3` або `pyodbc`. У разі вибору Access його writer потребуватиме Windows, `pyodbc` і Microsoft Access Database Engine відповідної розрядності.
 
 Для майбутнього запису Access із сучасним 64-бітним Altium обираємо 64-бітні Python та ACE; перед записом перевірятимемо драйвер `Microsoft Access Driver (*.mdb, *.accdb)`. Команда `inspect` не потребує `pyodbc`, ACE або Altium. Access Runtime включає ODBC/OLE DB-компоненти, але його сумісність із установленим Office потрібно перевірити перед установленням. [Microsoft Access Runtime](https://support.microsoft.com/en-us/access/download-and-install-microsoft-365-access-runtime), [розрядність рушія для Altium](https://www.altium.com/documentation/altium-designer/components-libraries/database-libraries/using-32-64-bit-altium-designer-same-computer).
 
@@ -75,11 +79,12 @@ class InvenTreeClient:
 
 def retrieve_dataset(config_path) -> PreparedDataset: ...
 def build_category_tree(categories): ...
-def build_table_schema(parts, parameters, templates): ...
-def parse_model_ref(value: str, kind: str) -> ModelRef: ...
-def build_row(part, parameters, config) -> dict[str, str | None]: ...
-def validate_dataset(dataset, config): ...
+def build_table_schemas(dataset: PreparedDataset) -> tuple[TableSchema, ...]: ...
+def parse_model_ref(value: str, kind: ModelKind) -> ModelRef: ...
+def resolve_model_path(ref: ModelRef, layout: LibraryLayout) -> str: ...
+def prepare_tables(dataset: PreparedDataset, layout: LibraryLayout) -> PreparedTables: ...
 def validate_table_name(category_name: str) -> None: ...
+# Заплановані контракти writer/pipeline:
 def write_access_database(dataset, template, destination): ...
 def sync(config) -> SyncReport: ...
 ```
@@ -123,15 +128,15 @@ HTTP-політика: перевірка TLS увімкнена, connect/read t
 
 `retrieval.retrieve_dataset(config_path)` завантажує конфігурацію, відкриває клієнт, читає категорії, визначає root PK, читає scoped Parts, створює спільні індекси й викликає наявний `group_parts`. Повертається `PreparedDataset` із деревом, root PK, множиною PK піддерева, `parts[pk]`, `parameters[part_pk][template_pk]`, `templates[pk]` та групами непорожніх leaf-категорій. Індекси доступні лише для читання. Частковий набір при помилці не повертається; клієнт закривається і при успіху, і при помилці. Генерації колонок, Access-запису та Altium-перетворень тут немає.
 
-## 4. Категорії та таблиці Access
+## 4. Категорії та таблиці компонентів
 
 Leaf-категорія визначається відсутністю дочірніх вузлів у повному доступному дереві InvenTree, а не рівнем вкладеності, назвою категорії чи кількістю Parts.
 
 Дерево категорій потрібне для визначення export scope, leaf/non-leaf стану, групування Parts, побудови діагностичного full path і перевірки коректності розміщення Parts. Воно не використовується для відтворення успадкування параметрів.
 
-Порожні leaf-категорії не експортуються. Якщо leaf-категорія не містить жодного Part, який проходить поточні export-фільтри, `inventree-sync` не створює для неї Access-таблицю і не намагається визначити її параметри через category assignments.
+Порожні leaf-категорії не експортуються. Якщо leaf-категорія не містить жодного Part, який проходить поточні export-фільтри, `inventree-sync` не створює для неї таблицю і не намагається визначити її параметри через category assignments.
 
-Назва кожної створюваної користувацької таблиці Access точно дорівнює фактичному `category.name`, отриманому з InvenTree. Поточні назви категорій можуть бути задокументовані окремо для людини, але документація не підміняє серверні дані і не бере участі у побудові схеми.
+Назва кожної логічної таблиці точно дорівнює фактичному `category.name`, отриманому з InvenTree. Поточні назви категорій можуть бути задокументовані окремо для людини, але документація не підміняє серверні дані і не бере участі у побудові схеми.
 
 Правила проєкту для назв експортованих категорій, сумісні з Access:
 
@@ -151,7 +156,7 @@ Access дозволяє імена об'єктів до 64 символів і �
 
 ## 5. Схема колонок із фактичних Part parameters
 
-Схема кожної користувацької таблиці Access формується **лише з фактичних параметрів експортованих Parts цієї leaf-категорії**.
+Логічна схема кожної таблиці формується **лише з фактичних параметрів експортованих Parts цієї leaf-категорії**. `schema.build_table_schemas(dataset)` використовує групи Milestone 1B і наявну `categories.validate_export_names`; не відтворює дерево чи успадкування. Перевірка індексів не дозволяє втратити Parts/параметри у вручну складеному некоректному наборі.
 
 InvenTree під час створення Part додає до нього параметри, визначені його категорією, включно з успадкованими від категорій вищого рівня. Тому `inventree-sync` не відтворює механізм успадкування категорій і не використовує category parameter assignments для побудови таблиць.
 
@@ -161,26 +166,30 @@ InvenTree під час створення Part додає до нього па�
 усі експортовані Parts категорії
   → фактичні Part parameters кожного Part
   → union ParameterTemplate, на які вони посилаються
-  → колонки Access
+  → логічні колонки
 ```
 
 Порядок технічних колонок фіксований: `IPN`, `Library Ref`, `Library Path`, `Footprint Ref`, `Footprint Path`.
 
-Після них ідуть параметри InvenTree у детермінованому порядку. Базовий стабільний порядок — за PK `ParameterTemplate`; якщо конкретна версія API надає стабільний порядок шаблонів, адаптер може зберегти його, але результат не повинен залежати від того, який Part був отриманий першим.
+Після них ідуть параметри InvenTree **строго за зростанням PK `ParameterTemplate`**. Milestone 1C уточнює попередній дизайн: порядок із API більше не є альтернативою. Порядок Parts, параметрів і словників на вході не змінює порядок колонок.
 
 Назви колонок параметрів залишаються точними іменами `ParameterTemplate` з InvenTree. Скрипт не перейменовує `Power Rating` у `Power`, `Mounting Type` у `Mount` тощо.
 
-Якщо параметр присутній хоча б на одному експортованому Part у категорії, відповідна колонка входить до таблиці. Якщо конкретний Part цього параметра не має, значення для його рядка → SQL NULL.
+Якщо параметр присутній хоча б на одному експортованому Part у категорії, відповідна колонка входить до таблиці. Якщо конкретний Part цього параметра не має, значення для його рядка — Python `None`; майбутній writer перетворить його на SQL NULL. Порожній рядок необов'язкового параметра також стає `None`; інші рядки, включно з пробілами, зберігаються дослівно.
 
 Порожня leaf-категорія не створює таблиці і не потребує визначення schema.
 
 Один і той самий `ParameterTemplate` дає одну колонку. Дубль параметра того самого template на одному Part, два різні templates з однаковим ім'ям без урахування регістру або колізія імені параметра з технічною колонкою — помилка, без перезаписування значень.
 
+Контракт імен полів: непорожній текст до 64 символів, без початкових пробілів, ASCII-керувальних символів (0–31, 127), крапки, `!`, зворотного апострофа та квадратних дужок. Конвенція назв **категорій** на поля не переноситься. `Value`, `Description`, пробіли всередині назв і Unicode підтримуються; SQL reserved words не забороняються для полів. Quoting ідентифікаторів належить writer. Ліміти кількості колонок і довжини значень конкретної БД у Milestone 1C не застосовуються.
+
+Кожне посилання на template має існувати у спільному індексі; PK ключа/об'єкта повинні збігатися, а параметр має належати відповідному Part. Усі значення — `str | None`. Обидві вихідні Altium-колонки входять до union нарівні з іншими параметрами.
+
 Значення завжди береться з фактичного параметра конкретного Part. Default шаблону не підставляється приховано.
 
 На рівні контракту експорту обов'язкові лише `Part.IPN`, `Altium Symbol` і `Altium Footprint`. `inventree-sync` не намагається повторно реалізувати required-логіку category assignments InvenTree для інших параметрів.
 
-Одиниці та choice lists залишаються метаданими InvenTree. Вони не дублюються в локальній конфігурації та не потрібні для формування Access schema. Якщо API повертає їх разом із `ParameterTemplate`, вони можуть бути використані у звіті або діагностиці, але не змінюють текстове значення параметра.
+Одиниці та choice lists залишаються метаданими InvenTree. Вони не дублюються в локальній конфігурації та не потрібні для формування логічної схеми. Якщо API повертає їх разом із `ParameterTemplate`, вони можуть бути використані у звіті або діагностиці, але не змінюють текстове значення параметра.
 
 Єдиний спеціальний контракт поверх довільної схеми InvenTree — `Part.IPN` та параметри `Altium Symbol` і `Altium Footprint`, необхідні для формування DbLib-запису. Їх спеціальна семантика описана в наступному розділі.
 
@@ -196,6 +205,8 @@ Altium Footprint = Resistors:RES_0603_H0.55
 ```
 
 Дозволити також явні розширення: `Passives.SchLib:Resistor` та `Resistors.PcbLib:RES_0603_H0.55`. Парсер вимагає рівно одну двокрапку та дві непорожні частини. Частина бібліотеки — basename без директорій; неправильне розширення, додаткова двокрапка чи шлях — помилка. Для назв застосовуються правила `library-convention.md`; двокрапка є роздільником, а не частиною назви. Windows drive path не є допустимим вхідним значенням.
+
+`parse_model_ref(value, kind)` підтримує `symbol` і `footprint` та повертає незмінний `ModelRef(kind, library_filename, model_name)`. Розширення дописується тільки коли воно відсутнє; явне розширення має бути точно `.SchLib` або `.PcbLib`. Пробіли не обрізаються, регістр і назва моделі не виправляються. Basename — PascalCase/акронім із можливими `_Qualifier`; символ — слова з великими початковими літерами/акроніми та числові кваліфікатори через `_` (однолітерні `R`, `C`, `L` відхиляються); footprint — великі ASCII-літери, цифри, `_`, десяткові крапки й дефіси між непорожніми частинами. Переліків дозволених сімейств немає: IC, connector і manufacturer-specific моделі підтримуються. Семантика електричної функції, механічних розмірів і варіантів не визначається з імені.
 
 При розташуванні `database/Components.DbLib` і `database/components.accdb`:
 
@@ -219,11 +230,46 @@ Altium Footprint = Resistors:RES_0603_H0.55
 
 Відносні шляхи обчислювати від папки цільового DbLib, не від робочої директорії процесу. Перевіряти існування файлів бібліотек. Перевірка наявності самого символу/footprint усередині бінарної бібліотеки потребує окремого Altium-індексу чи спеціалізованого парсера; перевірка файлу не доводить наявність моделі.
 
-Повторне використання моделі багатьма Parts допустиме. Посилання на одну канонічну назву в різних бібліотеках — конфлікт згідно з правилами репозиторію, але повний пошук невикористаних дублів також потребує індексу бібліотек.
+Milestone 1C приймає `LibraryLayout(dblib_path, symbols_dir, footprints_dir)`: три абсолютні native `pathlib.Path`, прив'язані викликаючим кодом до явно вибраної базової директорії. Відносні шляхи об'єкта відхиляються; залежності від поточного working directory немає. Цільовий DbLib та його папка можуть ще не існувати. Для кожної використаної бібліотеки перевіряється `is_file()`; перевірка кешується в межах виклику, файл не читається й не змінюється. Вихідні відносні шляхи завжди мають Windows-роздільники `\`, також при запуску на іншій ОС. Різні диски/UNC shares, між якими відносного шляху немає, дають явну помилку без fallback на абсолютний шлях.
 
-У DbLib підключити `database/components.accdb` через сумісний Access OLE DB/ODBC-провайдер, увімкнути таблиці експортованих непорожніх leaf-категорій, призначити ключ `IPN` та наведені mappings. Назви таблиць не мають суфікса `$`. Поля Access не містять квадратних дужок у своїх назвах — у колонці mapping вони позначають спеціальні цілі Altium. `.accdb` є джерелом даних; `.DbLib` окремо містить підключення й mapping. [Офіційна документація Altium](https://www.altium.com/documentation/altium-designer/components-libraries/database-libraries/creating-defining).
+Для кожного Part обов'язкові точні назви `Altium Symbol` і `Altium Footprint`, фактичні призначення та непорожні коректні значення. Null, порожній рядок і самі пробіли відхиляються. `Package`, IPN та опис не використовуються як заміна. Оригінальні Altium-значення залишаються в динамічних колонках дослівно, а технічні поля використовують нормалізоване ім'я файлу.
+
+Глобальна перевірка охоплює лише посилання експортованого набору. Повторне використання моделі тієї самої бібліотеки дозволене; одна назва моделі в різних бібліотеках — помилка з контекстом обох Parts. Symbol і footprint мають окремі простори назв. Порівняння імен і бібліотек не враховує регістр для Windows/Altium; вихідні значення не змінюються. Повного сканування невикористаних бібліотек немає.
+
+### 6.1. Публічний API і PreparedTables — межа Milestone 1C
+
+`prepare_tables(dataset, layout)` спочатку будує всі схеми, потім розв'язує обов'язкові параметри, формує технічні поля й повні рядки та перевіряє їхню структуру. Виклик не виконує HTTP-запитів, SQL чи запису файлів. Єдина взаємодія з файловою системою — read-only перевірка бібліотек. Вхідний `PreparedDataset` не змінюється. При помилці повернення часткового результату немає.
+
+- `ColumnDefinition(name, template_pk)` описує логічну колонку; `template_pk=None` позначає технічну колонку. SQL-типів у моделі немає.
+- `TableSchema(category_pk, name, category_path, columns)` — самостійний результат `build_table_schemas` для аналізу схеми.
+- `PreparedTable(category_pk, name, category_path, columns, rows)` містить повний шлях категорії, впорядковані колонки та один рядок на Part.
+- `PreparedTables(tables)` містить кортеж таблиць за category PK. Динамічні колонки впорядковані за template PK, рядки — за Part PK. Dataclasses frozen, колекції — кортежі, рядки — `MappingProxyType[str, str | None]`.
+- `ExportValidationError` — спільний тип помилок; `SchemaError` і `ModelReferenceError` уточнюють причину. Повідомлення включають доступний контекст Part/IPN, категорії/шляху, template/назви, reference або файлу.
+
+Приклад для Python/debugger (шляхи `config_path`, `target_dblib`, `symbol_directory`, `footprint_directory` задає викликаючий код; останні три — абсолютні `Path`):
+
+```python
+from inventree_sync.retrieval import retrieve_dataset
+from inventree_sync.schema import build_table_schemas
+from inventree_sync.transform import LibraryLayout, prepare_tables
+
+dataset = retrieve_dataset(config_path)  # HTTP тільки на етапі Milestone 1B
+layout = LibraryLayout(target_dblib, symbol_directory, footprint_directory)
+schemas = build_table_schemas(dataset)  # необов'язково, для аналізу колонок
+prepared = prepare_tables(dataset, layout)
+table = prepared.tables[0]
+print(table.name, table.category_path)
+print([column.name for column in table.columns])
+print(dict(table.rows[0]))  # зручний breakpoint для перегляду результату
+```
+
+`inspect` зберігає поведінку Milestone 1B і не викликає `prepare_tables`. Немає нової CLI-команди або нових TOML-параметрів. `validate`/`sync` залишаються явно нереалізованими до завершення writer та інтеграційних перевірок. Наступний етап має вибрати backend, відобразити логічні колонки на типи/ліміти сховища й реалізувати безпечний запис та перевірку результату.
+
+У разі вибору Access збережений план DbLib такий: підключити `database/components.accdb` через сумісний Access OLE DB/ODBC-провайдер, увімкнути таблиці експортованих непорожніх leaf-категорій, призначити ключ `IPN` та наведені mappings. Назви таблиць не мають суфікса `$`. Поля Access не містять квадратних дужок у своїх назвах — у колонці mapping вони позначають спеціальні цілі Altium. `.accdb` є джерелом даних; `.DbLib` окремо містить підключення й mapping. [Офіційна документація Altium](https://www.altium.com/documentation/altium-designer/components-libraries/database-libraries/creating-defining).
 
 ## 7. Схема і надійний запис Microsoft Access
+
+Це збережений проєкт **можливого Access backend**, а не поведінка Milestone 1C. Типи, SQL, ліміти сховища, транзакції та публікація нижче ще не реалізовані. Вибір Access/SQLite залишається відкритим; вимоги безпеки цього розділу застосовуються при реалізації Access writer.
 
 Файл має формат `.accdb`. Для створення тимчасової бази копіювати заздалегідь підготовлений порожній Access-файл, заданий через `access.template`. Його потрібно один раз створити у Microsoft Access та зберегти як технічний шаблон без користувацьких таблиць, зв'язків, запитів і макросів. Нульовий файл із розширенням `.accdb` не є базою; ODBC-підключення не замінює її створення. Відсутній або некоректний шаблон — помилка preflight; шаблон не змінюється.
 
@@ -265,7 +311,7 @@ INSERT INTO [Fixed Resistors] ([IPN], [Package], [Value]) VALUES (?, ?, ?)
 
 ## 8. Конфігурація та запуск
 
-Нижче наведено повну цільову конфігурацію. Реалізована команда `inspect` використовує лише `[inventree]` і `[scope]`, як у `tools/inventree-sync/config.example.toml`; файлові секції належать наступним етапам:
+Нижче збережено приклад цільової конфігурації попереднього Access-дизайну. Реалізована команда `inspect` використовує лише `[inventree]` і `[scope]`, як у `tools/inventree-sync/config.example.toml`; файлові секції належать наступним етапам. Milestone 1C отримує шляхи через `LibraryLayout`, не розширюючи TOML:
 
 ```toml
 [inventree]
@@ -348,10 +394,12 @@ config + secrets
   → ігнорування leaf-категорій без експортованих Parts
   → групування Parts за leaf-категоріями
   → PreparedDataset (межа Milestone 1B; inspect виводить summary)
-  → наступні етапи:
   → union фактичних параметрів усіх Parts кожної категорії
   → перетворення Altium refs і рядків
   → перевірка всього набору
+  → PreparedTables (межа Milestone 1C; таблиці лише в пам'яті)
+  → наступний етап: вибір backend і writer
+  → у разі вибору Access, попередній план:
   → тимчасовий ACCDB → DDL + INSERT → commit → повторне читання
   → закриття з'єднань → заміна цільового ACCDB
   → JSON-звіт і маніфест
@@ -372,4 +420,4 @@ JSON-звіт: час початку/кінця, версія програми �
 5. Повторне читання ACCDB: `0603`, `%`, Unicode одиниць, апострофи і `=...` залишаються текстом; довгі значення не обрізаються; відсутнє значення є NULL; дубль IPN відхиляється; помилка або lock не змінює попередню базу.
 6. Інтеграційна перевірка на Windows із конкретним InvenTree та Altium: ACE відповідної розрядності, видимість таблиць і Short/Long Text полів, пошук за IPN, розміщення символу та передача footprint на PCB. Перевірити два послідовні sync, видалення/переміщення Part, перейменування категорії і блокування файлу Altium.
 
-Для Milestone 1B задано цільову версію InvenTree 1.5.6 / API schema 530. Адреса й облікові дані живого сервера не задані; його відповіді, права доступу та повнота видимого дерева цим запуском не перевірялися. Unit-тести використовують локальні fixtures і mocks. Технічний шаблон `database/templates/empty.accdb` зберігається в репозиторії; його перевірка з конкретним ACE/Altium середовищем та реалізація наступних етапів синхронізації залишаються окремими завданнями.
+Для Milestone 1B задано цільову версію InvenTree 1.5.6 / API schema 530; Milestone 1C не змінює цей контракт. Живий сервер, права доступу й повнота видимого дерева не перевірялися. Unit-тести використовують локальні fixtures, mocks, тимчасові директорії й тестові файли бібліотек; це не перевірка бінарних моделей або сумісності з Altium. Технічний шаблон `database/templates/empty.accdb` зберігається в репозиторії; його перевірка з конкретним ACE/Altium середовищем та реалізація writer залишаються окремими завданнями.

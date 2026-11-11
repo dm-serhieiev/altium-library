@@ -1,6 +1,6 @@
 # Архітектура inventree-sync: InvenTree → Microsoft Access → Altium DbLib
 
-Статус: проєкт структури Python-програми, а не реалізований скрипт.
+Статус: Milestone 1A реалізував основу й API-клієнт; Milestone 1B додає читання вибраного піддерева та команду `inspect`. Генерація схеми Access, Altium-перетворення й публікація ACCDB залишаються запланованими етапами.
 
 Назва програми та console command — `inventree-sync`, назва Python-пакета — `inventree_sync`. Синхронізація одностороння: InvenTree є джерелом істини, файл Microsoft Access `.accdb` — відтворюваною проміжною базою для Altium DbLib. Скрипт читає InvenTree і не змінює його категорії або компоненти.
 
@@ -36,12 +36,13 @@ tools/inventree-sync/
 ├── src/inventree_sync/
 │   ├── __init__.py
 │   ├── __main__.py        # виклик CLI
-│   ├── cli.py             # validate/sync, коди завершення
+│   ├── cli.py             # inspect; validate/sync поки не реалізовані
 │   ├── config.py          # TOML, env, перевірка конфігурації
 │   ├── api.py             # HTTP, auth, timeout, retry, pagination
 │   ├── adapters.py        # особливості версій REST API
-│   ├── models.py          # dataclass: Category, Part, ParameterTemplate, Parameter, ModelRef
+│   ├── models.py          # Category, Part, ParameterTemplate, Parameter, PartWithParameters
 │   ├── categories.py      # дерево, scope, листки, перевірка назв таблиць
+│   ├── retrieval.py       # retrieve_dataset, PreparedDataset, спільні індекси
 │   ├── schema.py          # union фактичних Part parameters → колонки
 │   ├── transform.py       # параметри → рядок, розбір Altium refs
 │   ├── validate.py        # цілісність, дублікати, правила експорту
@@ -52,23 +53,27 @@ tools/inventree-sync/
     ├── fixtures/          # знеособлені відповіді підтримуваних API
     ├── test_api.py
     ├── test_categories.py
+    ├── test_retrieval.py
+    ├── test_cli.py
     ├── test_transform.py
     └── test_sync.py
 ```
 
 Залежності: Python 3.11+ (`tomllib`, `dataclasses`, `argparse`, `pathlib`, `logging`), `requests` для HTTP, `pyodbc` для Access, `pytest` для тестування. Цільове середовище запису — Windows із драйвером Microsoft Access Database Engine відповідної розрядності. Версії залежностей фіксуються після перевірки реалізації.
 
-Для сучасного 64-бітного Altium обираємо 64-бітні Python та ACE; на початку перевіряємо доступність драйвера `Microsoft Access Driver (*.mdb, *.accdb)`. Access Runtime включає ODBC/OLE DB-компоненти, але його сумісність із установленим Office потрібно перевірити перед установленням. [Microsoft Access Runtime](https://support.microsoft.com/en-us/access/download-and-install-microsoft-365-access-runtime), [розрядність рушія для Altium](https://www.altium.com/documentation/altium-designer/components-libraries/database-libraries/using-32-64-bit-altium-designer-same-computer).
+Для майбутнього запису Access із сучасним 64-бітним Altium обираємо 64-бітні Python та ACE; перед записом перевірятимемо драйвер `Microsoft Access Driver (*.mdb, *.accdb)`. Команда `inspect` не потребує `pyodbc`, ACE або Altium. Access Runtime включає ODBC/OLE DB-компоненти, але його сумісність із установленим Office потрібно перевірити перед установленням. [Microsoft Access Runtime](https://support.microsoft.com/en-us/access/download-and-install-microsoft-365-access-runtime), [розрядність рушія для Altium](https://www.altium.com/documentation/altium-designer/components-libraries/database-libraries/using-32-64-bit-altium-designer-same-computer).
 
 Основні контракти функцій:
 
 ```python
 class InvenTreeClient:
     def iter_categories(self): ...
-    def iter_parts(self): ...
-    def iter_parameter_templates(self): ...
-    def iter_part_parameters(self): ...
+    def iter_parts_with_parameters(self, category_pk: int): ...
+    def iter_parts(self): ...                 # лише діагностика
+    def iter_parameter_templates(self): ...   # лише діагностика
+    def iter_part_parameters(self): ...       # лише діагностика
 
+def retrieve_dataset(config_path) -> PreparedDataset: ...
 def build_category_tree(categories): ...
 def build_table_schema(parts, parameters, templates): ...
 def parse_model_ref(value: str, kind: str) -> ModelRef: ...
@@ -83,25 +88,40 @@ HTTP-відповіді нормалізує `adapters.py`; решта прог�
 
 ## 3. Авторизація і REST API
 
-Основний спосіб — токен із змінної `INVENTREE_API_TOKEN`, заголовок `Authorization: Token <token>`. Альтернатива — HTTP Basic із username і паролем, отриманим через `getpass` або env. Basic надсилається лише через HTTPS. Не потрібні браузерний логін або збереження сесійних cookies. Токен, пароль і HTTP-заголовки не потрапляють у конфігурацію, Git або звіт. [Документація авторизації InvenTree](https://docs.inventree.org/en/latest/api/).
+Реалізований спосіб — токен зі змінної, заданої `inventree.token_env` (типово `INVENTREE_API_TOKEN`), заголовок `Authorization: Token <token>`. Запланована альтернатива HTTP Basic ще не реалізована; у майбутньому вона допускається лише через HTTPS із username і паролем через `getpass` або env. Не потрібні браузерний логін або збереження сесійних cookies. Токен, пароль і HTTP-заголовки не потрапляють у конфігурацію, Git або звіт. [Документація авторизації InvenTree](https://docs.inventree.org/en/latest/api/).
 
-План запитів:
+### 3.1. Основний шлях читання — InvenTree 1.5.6, API schema 530
+
+Цільову версію та можливості API підтверджено у завданні Milestone 1B. Локальної OpenAPI-специфікації в робочому дереві немає; контракт звірено з upstream tag `1.5.6`. Поведінку category/cascade визначає [part/api.py](https://github.com/inventree/InvenTree/blob/1.5.6/src/backend/InvenTree/part/api.py), вкладені parameters — [part/serializers.py](https://github.com/inventree/InvenTree/blob/1.5.6/src/backend/InvenTree/part/serializers.py) і [common/filters.py](https://github.com/inventree/InvenTree/blob/1.5.6/src/backend/InvenTree/common/filters.py), а `template_detail` — [common/serializers.py](https://github.com/inventree/InvenTree/blob/1.5.6/src/backend/InvenTree/common/serializers.py). Читання живого сервера цим клієнтом ще не перевірене.
+
+Основний шлях використовує лише:
 
 | Дані | Endpoint / стратегія |
 |---|---|
-| Версія і можливості | API root та схема конкретного сервера, доступна через його `/api-doc/` |
-| Категорії | `GET /api/part/category/` |
-| Компоненти | `GET /api/part/` |
-| Шаблони параметрів | `GET /api/parameter/template/` у сучасному API |
-| Значення параметрів | `GET /api/parameter/` у сучасному API; фільтри `model_type` і, за потреби, `model_id` |
+| Категорії | `GET /api/part/category/`, усі доступні категорії й сторінки |
+| Parts, фактичні parameters і templates | `GET /api/part/?category=<root_pk>&cascade=true&parameters=true`, усі сторінки вибраного піддерева |
 
-Маршрути категорій описані у [Parts API](https://docs.inventree.org/en/latest/api/schema/part/); універсальні параметри — у [General API](https://docs.inventree.org/en/latest/api/schema/general/). Значення `model_type` для Part та формат полів зв'язку перевіряються за схемою встановленої версії, а не вгадуються. Старі сервери можуть вимагати окремий адаптер параметрів Parts; непідтримувана схема завершує запуск до запису ACCDB.
+Спочатку завантажується повне доступне дерево, `scope.root_category_path` знаходить рівно один кореневий PK, після чого запит Parts передає `category=str(root_pk)`, `cascade="true"`, `parameters="true"`. PK має бути додатним цілим числом, а не bool. Основний шлях **не завантажує всі Parts бази для подальшого локального відсіювання**. Локальна перевірка кожного поверненого Part залишається обов'язковою: чужа категорія, non-leaf розміщення або відсутня категорія є помилкою.
 
-Усі списки читаються повністю з пагінацією: підтримати `results/next` і непагінований масив, перевіряти повторення сторінок і `pk`. Абсолютний `next` дозволений лише для того самого origin і базового API-шляху; переходи HTTP на інший сервер заборонені. Використовувати query params клієнта для URL-кодування, зокрема `%` в IPN.
+Окремі bulk-запити `/api/parameter/` і `/api/parameter/template/` не потрібні, коли вкладена відповідь містить необхідні дані. Попередні методи Milestone 1A залишаються для явної діагностики чи майбутньої обґрунтованої сумісності. Автоматичного fallback, запитів на кожен Part/template або додаткового запиту версії в основному шляху немає. Непідтримувана структура відповіді завершує читання помилкою.
 
-Завантажувати фактичні параметри Parts пакетно там, де це дозволяє API; інакше — окремими запитами за Part із кешем шаблонів. Не припускати, що `/api/part/` містить усі параметри. Category parameter assignments для побудови export schema не потрібні. Не довіряти неявній рекурсивності фільтра category: остаточна перевірка належності Part до leaf-category виконується локально.
+Усі списки читаються повністю з пагінацією: підтримуються `results/next` і непагінований масив, перевіряються повторення сторінок/PK та `count`, якщо він присутній. `next` дозволений лише для того самого origin та endpoint усередині базового API-шляху. Кожен із фільтрів `category`, `cascade`, `parameters` має залишатися рівно один раз із незмінним значенням на всіх сторінках; зникнення, зміна або дублювання фільтра — помилка. HTTP redirects не виконуються. Query parameters кодуються стандартними URL-засобами.
+
+За `C` сторінок категорій і `P` сторінок Parts потрібно **C + P GET-запитів** без урахування повторів після тимчасових HTTP-помилок. Вкладені параметри й шаблони не збільшують цю кількість. Category parameter assignments та реконструкція успадкування не використовуються.
 
 HTTP-політика: перевірка TLS увімкнена, connect/read timeout, обмежені повтори GET для 429 і тимчасових 5xx із Retry-After/backoff; 401/403 — негайна помилка, без перемикання способу авторизації. Відсутність доступу не трактувати як порожню категорію. Обліковий запис повинен бачити все вибране дерево: невидимих через права дочірніх категорій клієнт самостійно виявити не зможе.
+
+### 3.2. Нормалізація й підготовлений набір даних
+
+`adapters.part_with_parameters()` повертає `PartWithParameters`: `Part`, кортеж фактичних `Parameter` і кортеж отриманих `ParameterTemplate`. Властивість `pk` агрегату посилається на Part PK для наявної перевірки пагінації. Raw JSON залишається всередині API/adapter шару.
+
+- `parameters` є обов'язковим списком; `[]` допустимий. Пропуск, null чи інший тип — помилка, без fallback.
+- Для параметра потрібні додатні `pk`, `model_id`, `template`; `model_id` має дорівнювати PK батьківського Part. Якщо `model_type` присутній, він має дорівнювати `part.part`; для окремого діагностичного endpoint це поле обов'язкове.
+- `data` є текстом або null; лише порожній рядок нормалізується до `None`. `data_numeric` не використовується.
+- Кожний вкладений параметр повинен містити об'єкт `template_detail` з `pk`, текстовим `name` і текстовим `units` (порожній рядок допустимий). `template_detail.pk` дорівнює `template`. Підтримувані метадані — PK/name/units; довільні додаткові поля не копіюються у внутрішні моделі.
+- Повтор параметра за PK або повтор template на одному Part — помилка. Спільний template PK між різними Parts допустимий лише за однакових name/units; конфлікт завершує читання з контекстом обох Parts і template PK.
+
+`retrieval.retrieve_dataset(config_path)` завантажує конфігурацію, відкриває клієнт, читає категорії, визначає root PK, читає scoped Parts, створює спільні індекси й викликає наявний `group_parts`. Повертається `PreparedDataset` із деревом, root PK, множиною PK піддерева, `parts[pk]`, `parameters[part_pk][template_pk]`, `templates[pk]` та групами непорожніх leaf-категорій. Індекси доступні лише для читання. Частковий набір при помилці не повертається; клієнт закривається і при успіху, і при помилці. Генерації колонок, Access-запису та Altium-перетворень тут немає.
 
 ## 4. Категорії та таблиці Access
 
@@ -245,7 +265,7 @@ INSERT INTO [Fixed Resistors] ([IPN], [Package], [Value]) VALUES (?, ?, ?)
 
 ## 8. Конфігурація та запуск
 
-Приклад майбутнього `config.example.toml` (не готовий до запуску без реалізації):
+Нижче наведено повну цільову конфігурацію. Реалізована команда `inspect` використовує лише `[inventree]` і `[scope]`, як у `tools/inventree-sync/config.example.toml`; файлові секції належать наступним етапам:
 
 ```toml
 [inventree]
@@ -258,7 +278,7 @@ retries = 3
 
 [scope]
 root_category_path = ["Electronic Components"]
-# Для повної бази scope можна явно переключити на all.
+# Синтаксис майбутнього режиму all ще не визначено; він не реалізований.
 
 [sync]
 output = "../../database/components.accdb"
@@ -273,29 +293,62 @@ symbols = "../../symbols"
 footprints = "../../footprints"
 ```
 
-Усі файлові шляхи конфігурації відносні до самого TOML. Кореневий шлях категорії має знаходити рівно один вузол. У режимі всієї бази некатегоризовані Parts також перевіряються; у режимі піддерева звіт явно показує межу експорту. Порожні leaf-категорії завжди ігноруються і окремої опції для їх експорту немає. Конфігурація задає лише підключення, область синхронізації та технічні параметри експорту. Вона не містить списків категорій, параметрів, units, choices або успадкування.
+Усі майбутні файлові шляхи конфігурації будуть відносні до самого TOML. Кореневий шлях категорії має знаходити рівно один вузол; зараз підтримується лише цей режим. Режим усієї бази залишається відкладеним рішенням, зокрема його TOML-синтаксис і перевірка некатегоризованих Parts. У режимі піддерева summary явно показує межу читання. Порожні leaf-категорії завжди ігноруються і окремої опції для їх експорту немає. Конфігурація задає лише підключення, область синхронізації та технічні параметри експорту. Вона не містить списків категорій, параметрів, units, choices або успадкування.
 
-Майбутній CLI:
+CLI:
 
 ```text
+inventree-sync inspect --config config.toml
 inventree-sync validate --config config.toml
 inventree-sync sync --config config.toml
 # Еквівалентний виклик Python-пакета:
-python -m inventree_sync sync --config config.toml
+python -m inventree_sync inspect --config config.toml
 ```
 
-`validate` перевіряє драйвер, шаблон, конфігурацію та завантажені дані без заміни ACCDB. `sync` повторює перевірки й публікує базу лише за відсутності помилок. На рівні контракту експорту завжди обов'язкові `IPN`, `Altium Symbol` і `Altium Footprint`. Для інших параметрів `inventree-sync` не відтворює required-логіку category assignments; якщо колонка існує через інші Parts, відсутнє значення конкретного Part залишається NULL. Console command реєструється через `[project.scripts]` у `pyproject.toml`: `inventree-sync = "inventree_sync.cli:main"`.
+`inspect` виконує повне читання і структурну перевірку Milestone 1B. При успіху виводить кореневу категорію/PK/шлях, кількість категорій у піддереві, Parts, експортованих leaf-категорій, фактичних параметрів і різних шаблонів, а також підтвердження вкладеного читання. Код `0` повертається тільки після завершення всіх сторінок і перевірок. Помилка конфігурації/даних → `2`; HTTP або непідтримувана структура API → `3`; неочікувана помилка → `1`. Secrets і raw responses не виводяться.
+
+`validate` і `sync` поки явно повертають `not implemented` із ненульовим кодом. Їхній майбутній контракт: `validate` перевіряє драйвер, шаблон і весь набір без заміни ACCDB; `sync` додатково публікує базу. На рівні повного експорту обов'язкові `IPN`, `Altium Symbol` і `Altium Footprint`, але `inspect` поки не перевіряє Altium-посилання. Для інших параметрів не відтворюється required-логіка category assignments. Console command: `[project.scripts]`, `inventree-sync = "inventree_sync.cli:main"`.
+
+### Ручний запуск inspect на сервері
+
+У PowerShell із кореня репозиторію (середовище створюється лише за його відсутності):
+
+```powershell
+if (-not (Test-Path -LiteralPath ./tools/inventree-sync/.venv)) {
+    python -m venv tools/inventree-sync/.venv
+}
+& ./tools/inventree-sync/.venv/Scripts/python.exe -m pip install -e ./tools/inventree-sync
+if (-not (Test-Path -LiteralPath ./tools/inventree-sync/config.toml)) {
+    Copy-Item ./tools/inventree-sync/config.example.toml ./tools/inventree-sync/config.toml
+}
+```
+
+Копіювати приклад лише якщо локального `config.toml` ще немає. У ньому вказати реальні `base_url` сервера (без суфікса `/api/`) та `root_category_path`. Файл ігнорується Git. Якщо токен уже заданий у змінній середовища `INVENTREE_API_TOKEN`:
+
+```powershell
+& ./tools/inventree-sync/.venv/Scripts/inventree-sync.exe inspect --config ./tools/inventree-sync/config.toml
+```
+
+Альтернатива без токена в історії команд: приховано прочитати його через Python `getpass` і передати дочірньому процесу в env (для стандартного `token_env`):
+
+```powershell
+& ./tools/inventree-sync/.venv/Scripts/python.exe -c "import getpass, os, subprocess, sys; os.environ['INVENTREE_API_TOKEN'] = getpass.getpass('InvenTree token: '); sys.exit(subprocess.call([sys.executable, '-m', 'inventree_sync', 'inspect', '--config', 'tools/inventree-sync/config.toml']))"
+```
+
+Команда виконує лише GET. Вона не створює файлів ACCDB і не змінює `.DbLib` чи дані InvenTree.
 
 ## 9. Послідовність і контроль якості
 
 ```text
 config + secrets
-  → автентифікація і перевірка API
-  → дерево категорій + Parts
+  → токен → повне доступне дерево категорій → визначення root PK
+  → Parts?category=<root_pk>&cascade=true&parameters=true (всі сторінки)
+  → нормалізація вкладених parameters/template_detail → спільні індекси
   → перевірка scope, leaf/non-leaf розміщення та унікальності IPN
   → ігнорування leaf-категорій без експортованих Parts
-  → фактичні Part parameters + потрібні ParameterTemplates
   → групування Parts за leaf-категоріями
+  → PreparedDataset (межа Milestone 1B; inspect виводить summary)
+  → наступні етапи:
   → union фактичних параметрів усіх Parts кожної категорії
   → перетворення Altium refs і рядків
   → перевірка всього набору
@@ -319,4 +372,4 @@ JSON-звіт: час початку/кінця, версія програми �
 5. Повторне читання ACCDB: `0603`, `%`, Unicode одиниць, апострофи і `=...` залишаються текстом; довгі значення не обрізаються; відсутнє значення є NULL; дубль IPN відхиляється; помилка або lock не змінює попередню базу.
 6. Інтеграційна перевірка на Windows із конкретним InvenTree та Altium: ACE відповідної розрядності, видимість таблиць і Short/Long Text полів, пошук за IPN, розміщення символу та передача footprint на PCB. Перевірити два послідовні sync, видалення/переміщення Part, перейменування категорії і блокування файлу Altium.
 
-Наразі сервер InvenTree, його версія та облікові дані не задані. API-контракт і вимоги Access звірені з офіційними джерелами. Технічний шаблон `database/templates/empty.accdb` уже зберігається в репозиторії; його коректність із конкретним ACE/Altium середовищем ще потрібно перевірити інтеграційно. Реалізація програми, перевірка встановленого ACE та жива синхронізація з Altium залишаються наступним етапом.
+Для Milestone 1B задано цільову версію InvenTree 1.5.6 / API schema 530. Адреса й облікові дані живого сервера не задані; його відповіді, права доступу та повнота видимого дерева цим запуском не перевірялися. Unit-тести використовують локальні fixtures і mocks. Технічний шаблон `database/templates/empty.accdb` зберігається в репозиторії; його перевірка з конкретним ACE/Altium середовищем та реалізація наступних етапів синхронізації залишаються окремими завданнями.

@@ -318,6 +318,18 @@ Local configuration files containing real server addresses or credentials should
 
 Keep InvenTree HTTP behavior isolated from the rest of the application according to the architecture.
 
+The primary retrieval contract targets InvenTree 1.5.6 / API schema 530. Follow
+`docs/architecture/inventree-sync-design.md`, section 3: fetch all accessible
+categories, resolve the configured root PK, then request Parts with
+`category=<root_pk>&cascade=true&parameters=true` on every page. Do not download
+all Parts and discard those outside scope. Build shared parameter/template
+indexes from actual nested parameters and `template_detail`; conflicting
+template metadata or missing nested data must fail explicitly. Do not add
+automatic fallback or separate parameter/template requests to this path.
+Server-side filtering does not replace local category and Part validation.
+The read-only `inspect` command uses this workflow and must not create Access
+output or claim full validation/synchronization.
+
 Raw API JSON must not leak unnecessarily into category, schema, transformation, or Access-writing logic.
 
 Use the adapter layer for API-version-specific response structures.

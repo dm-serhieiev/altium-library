@@ -1,13 +1,13 @@
-"""Modern universal-parameter API adapter (no legacy field-name guessing).
+"""InvenTree 1.5.6 / API schema 530 adapter (no legacy field-name guessing).
 
 Source contracts: InvenTree common/serializers.py ParameterSerializer and
-InvenTree/serializers.py ContentTypeField (app_label.model_name), upstream master
-reviewed 2026-10-02. Live-server/version compatibility remains unverified.
+part/serializers.py PartSerializer and common/filters.py enable_parameters_filter,
+upstream tag 1.5.6 reviewed 2026-11-11. Live-server compatibility remains unverified.
 """
 
 from typing import Literal, overload
 
-from .models import Category, Parameter, ParameterTemplate, Part
+from .models import Category, Parameter, ParameterTemplate, Part, PartWithParameters
 
 CATEGORIES_ENDPOINT = "part/category/"
 PARTS_ENDPOINT = "part/"
@@ -82,17 +82,58 @@ def part(raw: object) -> Part:
 
 def parameter_template(raw: object) -> ParameterTemplate:
     obj, context = _record(raw, "ParameterTemplate")
-    return ParameterTemplate(_pk(obj, "pk", context), _text(obj, "name", context))
+    units = _text(obj, "units", context) if "units" in obj else None
+    return ParameterTemplate(_pk(obj, "pk", context), _text(obj, "name", context), units)
 
 
-def parameter(raw: object) -> Parameter:
+def parameter(raw: object, *, expected_part_pk: int | None = None) -> Parameter:
     obj, context = _record(raw, "Parameter")
-    if _required(obj, "model_type", context) != PART_MODEL_TYPE:
+    parameter_pk = _pk(obj, "pk", context)
+    # A nested record has an explicit parent Part; validate model_type if supplied.
+    # Standalone diagnostic records still require it to establish the target type.
+    if (expected_part_pk is None or "model_type" in obj) and _required(obj, "model_type", context) != PART_MODEL_TYPE:
         raise AdapterError(f"{context}: unsupported model_type; expected Part content type")
     part_pk = _pk(obj, "model_id", context)
     template_pk = _pk(obj, "template", context)
     context += f" Part pk={part_pk} template pk={template_pk}"
+    if expected_part_pk is not None and part_pk != expected_part_pk:
+        raise AdapterError(f"{context}: parameter belongs to a different Part; expected Part pk={expected_part_pk}")
     data = _text(obj, "data", context, nullable=True)
-    return Parameter(_pk(obj, "pk", context), part_pk, template_pk,
+    return Parameter(parameter_pk, part_pk, template_pk,
                      None if data == "" else data)
+
+
+def part_with_parameters(raw: object) -> PartWithParameters:
+    obj, context = _record(raw, "Part")
+    component = part(obj)
+    records = _required(obj, "parameters", context)
+    if not isinstance(records, list):
+        raise AdapterError(f"{context}: 'parameters' must be a list")
+    parameters: list[Parameter] = []
+    templates: dict[int, ParameterTemplate] = {}
+    seen_pks: set[int] = set()
+    for record in records:
+        try:
+            value = parameter(record, expected_part_pk=component.pk)
+            parameter_context = f"Parameter pk={value.pk} template pk={value.template_pk}"
+            nested, _ = _record(record, parameter_context)
+            detail, detail_context = _record(
+                _required(nested, "template_detail", parameter_context),
+                f"{parameter_context} template_detail",
+            )
+            # Required in the primary 1.5.6 contract, even for unitless templates.
+            _text(detail, "units", detail_context)
+            template = parameter_template(detail)
+            if template.pk != value.template_pk:
+                raise AdapterError(f"{parameter_context}: template_detail.pk={template.pk} does not match template reference")
+            if value.pk in seen_pks:
+                raise AdapterError(f"{parameter_context}: duplicate parameter PK")
+            if template.pk in templates:
+                raise AdapterError(f"{parameter_context}: duplicate parameter template on Part")
+            seen_pks.add(value.pk)
+            templates[template.pk] = template
+            parameters.append(value)
+        except AdapterError as exc:
+            raise AdapterError(f"{context}: {exc}") from None
+    return PartWithParameters(component, tuple(parameters), tuple(templates.values()))
 

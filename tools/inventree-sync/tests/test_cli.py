@@ -27,4 +27,4 @@ def test_cli_configuration_error(monkeypatch, capsys):
 def test_installed_module_entry_point():
     result = subprocess.run([sys.executable, "-m", "inventree_sync", "--help"], capture_output=True, text=True)
     assert result.returncode == 0
-    assert "validate" in result.stdout and "sync" in result.stdout
+    assert all(command in result.stdout for command in ("inspect", "validate", "sync"))

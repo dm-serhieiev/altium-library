@@ -78,3 +78,101 @@ def test_part_nulls_not_fabricated(fixture_record):
     raw.update(IPN=None, category=None, name="Not an IPN")
     assert adapters.part(raw) == Part(20, None, None)
 
+
+def test_nested_part_is_typed(fixture_record):
+    result = adapters.part_with_parameters(fixture_record("part_with_parameters"))
+    assert result.pk == 20
+    assert result.part == Part(20, "RES-10K-1%-0603", 2)
+    assert result.parameters == (Parameter(40, 20, 30, "0603"),)
+    assert result.templates == (ParameterTemplate(30, "Package", ""),)
+
+
+def test_empty_nested_parameters_are_valid(fixture_record):
+    raw = fixture_record("part_with_parameters")
+    raw["parameters"] = []
+    result = adapters.part_with_parameters(raw)
+    assert result.parameters == () and result.templates == ()
+
+
+def test_missing_nested_parameters_is_error(fixture_record):
+    raw = fixture_record("part")
+    with pytest.raises(adapters.AdapterError, match="Part pk=20.*parameters"):
+        adapters.part_with_parameters(raw)
+
+
+@pytest.mark.parametrize("records", [None, {}, "", 4, [None], ["bad"], [[]]])
+def test_malformed_nested_parameters(fixture_record, records):
+    raw = fixture_record("part_with_parameters")
+    raw["parameters"] = records
+    with pytest.raises(adapters.AdapterError, match="Part pk=20"):
+        adapters.part_with_parameters(raw)
+
+
+@pytest.mark.parametrize("field", ["pk", "model_id", "template", "data", "template_detail"])
+def test_missing_nested_parameter_field(fixture_record, field):
+    raw = fixture_record("part_with_parameters")
+    del raw["parameters"][0][field]
+    with pytest.raises(adapters.AdapterError, match=f"Part pk=20.*{field}"):
+        adapters.part_with_parameters(raw)
+
+
+@pytest.mark.parametrize("field,value", [
+    ("pk", True), ("pk", 0), ("pk", "40"),
+    ("model_id", 99), ("model_id", None), ("model_id", "20"),
+    ("template", 0), ("template", True), ("template", {}),
+    ("model_type", "stock.stockitem"), ("model_type", None),
+    ("template_detail", None), ("template_detail", []),
+    ("data", 603), ("data", False),
+])
+def test_invalid_nested_parameter(fixture_record, field, value):
+    raw = fixture_record("part_with_parameters")
+    raw["parameters"][0][field] = value
+    with pytest.raises(adapters.AdapterError, match="Part pk=20"):
+        adapters.part_with_parameters(raw)
+
+
+def test_nested_model_type_checked_when_present(fixture_record):
+    raw = fixture_record("part_with_parameters")
+    del raw["parameters"][0]["model_type"]
+    assert adapters.part_with_parameters(raw).parameters[0].part_pk == 20
+
+
+@pytest.mark.parametrize("field", ["pk", "name", "units"])
+def test_missing_template_detail_field(fixture_record, field):
+    raw = fixture_record("part_with_parameters")
+    del raw["parameters"][0]["template_detail"][field]
+    with pytest.raises(adapters.AdapterError, match="Part pk=20") as error:
+        adapters.part_with_parameters(raw)
+    assert field in str(error.value)
+
+
+@pytest.mark.parametrize("field,value", [("pk", 31), ("pk", False), ("name", None), ("name", 10), ("units", None), ("units", ["V"])])
+def test_invalid_template_detail(fixture_record, field, value):
+    raw = fixture_record("part_with_parameters")
+    raw["parameters"][0]["template_detail"][field] = value
+    with pytest.raises(adapters.AdapterError, match="Part pk=20"):
+        adapters.part_with_parameters(raw)
+
+
+@pytest.mark.parametrize("value", ["0603", "1%", "1E3", "10 kΩ", "=example", "  spaced  ", "", None])
+def test_nested_text_preserved(fixture_record, value):
+    raw = fixture_record("part_with_parameters")
+    raw["parameters"][0].update(data=value, data_numeric=603)
+    assert adapters.part_with_parameters(raw).parameters[0].data == (None if value == "" else value)
+
+
+@pytest.mark.parametrize("second_pk", [40, 41])
+def test_repeated_parameter_or_template_on_part(fixture_record, second_pk):
+    raw = fixture_record("part_with_parameters")
+    another = fixture_record("part_with_parameters")["parameters"][0]
+    another["pk"] = second_pk
+    raw["parameters"].append(another)
+    with pytest.raises(adapters.AdapterError, match="Part pk=20.*duplicate"):
+        adapters.part_with_parameters(raw)
+
+
+def test_diagnostic_template_preserves_units(fixture_record):
+    raw = fixture_record("template")
+    raw["units"] = "Ω"
+    assert adapters.parameter_template(raw).units == "Ω"
+

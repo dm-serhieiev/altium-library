@@ -12,10 +12,10 @@ import requests
 
 from . import adapters
 from .config import InvenTreeSettings, read_token
-from .models import Category, Parameter, ParameterTemplate, Part
+from .models import Category, Parameter, ParameterTemplate, Part, PartWithParameters
 
 logger = logging.getLogger(__name__)
-T = TypeVar("T", Category, Part, ParameterTemplate, Parameter)
+T = TypeVar("T", Category, Part, ParameterTemplate, Parameter, PartWithParameters)
 _RETRY_STATUSES = frozenset({429, 500, 502, 503, 504})
 
 
@@ -69,7 +69,18 @@ class InvenTreeClient:
         return self._iterate(adapters.CATEGORIES_ENDPOINT, adapters.category)
 
     def iter_parts(self) -> Iterator[Part]:
+        """Unfiltered diagnostic endpoint; never used by the export workflow."""
         return self._iterate(adapters.PARTS_ENDPOINT, adapters.part)
+
+    def iter_parts_with_parameters(self, category_pk: int) -> Iterator[PartWithParameters]:
+        """Read only the requested subtree, with actual parameters and templates."""
+        if type(category_pk) is not int or category_pk <= 0:
+            raise ValueError("category_pk must be a positive integer PK")
+        return self._iterate(
+            adapters.PARTS_ENDPOINT,
+            adapters.part_with_parameters,
+            {"category": str(category_pk), "cascade": "true", "parameters": "true"},
+        )
 
     def iter_parameter_templates(self) -> Iterator[ParameterTemplate]:
         return self._iterate(adapters.TEMPLATES_ENDPOINT, adapters.parameter_template)

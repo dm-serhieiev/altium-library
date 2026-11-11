@@ -1,4 +1,4 @@
-# Milestone 1A: read layer only. No component data or credentials belong here.
+# Milestone 1B: read-only inspect. No component data or credentials belong here.
 [inventree]
 base_url = "https://inventree.example.com"
 auth = "token"

@@ -1,6 +1,7 @@
 from datetime import datetime, timedelta, timezone
 from email.utils import format_datetime
 from unittest.mock import Mock
+from urllib.parse import parse_qsl, urlencode, urlsplit
 
 import pytest
 import requests
@@ -188,4 +189,63 @@ def test_deployment_subpath(monkeypatch, runtime_token):
     with InvenTreeClient(InvenTreeSettings("https://inventree.example.com/tools/")) as client:
         assert len(list(client.iter_categories())) == 2
     assert session.get.call_args_list[0].args[0] == "https://inventree.example.com/tools/api/part/category/"
+
+
+def test_scoped_parts_with_complete_pagination(transport, fixture_record):
+    client, session, _ = transport
+    first = fixture_record("part_with_parameters")
+    second = fixture_record("part_with_parameters")
+    second.update(pk=21, IPN="RES-1K-1%-0603", parameters=[])
+    session.get.side_effect = [
+        response({"count": 2, "results": [first], "next": "?category=1&parameters=true&cascade=true&offset=1"}),
+        response({"count": 2, "results": [second], "next": None}),
+    ]
+    result = list(client.iter_parts_with_parameters(1))
+    assert [item.pk for item in result] == [20, 21]
+    assert result[0].parameters[0].data == "0603"
+    assert result[1].parameters == ()
+    for call in session.get.call_args_list:
+        parsed = urlsplit(call.args[0])
+        assert parsed.path == "/api/part/"
+        query = dict(parse_qsl(parsed.query))
+        assert query["category"] == "1"
+        assert query["cascade"] == query["parameters"] == "true"
+    assert session.get.call_count == 2
+
+
+@pytest.mark.parametrize("pk", [0, -1, True, False, None, "1", 1.5])
+def test_invalid_scope_pk_fails_before_request(transport, pk):
+    client, session, _ = transport
+    with pytest.raises(ValueError, match="category_pk"):
+        client.iter_parts_with_parameters(pk)
+    session.get.assert_not_called()
+
+
+@pytest.mark.parametrize("field", ["category", "cascade", "parameters"])
+@pytest.mark.parametrize("mutation", ["remove", "change", "duplicate"])
+def test_scope_filters_cannot_change(transport, fixture_record, field, mutation):
+    client, session, _ = transport
+    filters = {"category": "1", "cascade": "true", "parameters": "true"}
+    if mutation == "remove":
+        del filters[field]
+    elif mutation == "change":
+        filters[field] = "2" if field == "category" else "false"
+    next_query = urlencode(filters) + "&offset=1"
+    if mutation == "duplicate":
+        next_query += "&" + urlencode({field: filters[field]})
+    session.get.return_value = response({"results": [fixture_record("part_with_parameters")], "next": "?" + next_query})
+    with pytest.raises(APIError, match="pagination URL"):
+        list(client.iter_parts_with_parameters(1))
+    assert session.get.call_count == 1
+
+
+def test_scoped_duplicate_part_pk(transport, fixture_record):
+    client, session, _ = transport
+    record = fixture_record("part_with_parameters")
+    session.get.side_effect = [
+        response({"results": [record], "next": "?category=1&cascade=true&parameters=true&offset=1"}),
+        response({"results": [record], "next": None}),
+    ]
+    with pytest.raises(APIError, match="repeated object pk=20"):
+        list(client.iter_parts_with_parameters(1))
 

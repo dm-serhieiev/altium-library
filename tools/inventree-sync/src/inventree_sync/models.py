@@ -21,6 +21,9 @@ class Part:
 class ParameterTemplate:
     pk: int
     name: str
+    # None means metadata was not supplied by a diagnostic endpoint.
+    # The primary nested adapter requires a textual units field (possibly "").
+    units: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -29,4 +32,18 @@ class Parameter:
     part_pk: int
     template_pk: int
     data: str | None
+
+
+@dataclass(frozen=True, slots=True)
+class PartWithParameters:
+    """One normalized response item; templates are shared when building a dataset."""
+
+    part: Part
+    parameters: tuple[Parameter, ...]
+    templates: tuple[ParameterTemplate, ...]
+
+    @property
+    def pk(self) -> int:
+        """Let the existing paginator detect repeated Part primary keys."""
+        return self.part.pk
 

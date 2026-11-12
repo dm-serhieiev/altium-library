@@ -96,25 +96,24 @@ Synchronization is strictly one-way:
 InvenTree -> prepared logical tables -> generated database -> Altium DbLib
 ```
 
-Milestone 1C introduces database-independent `PreparedTables`. The eventual
-Access-versus-SQLite backend decision is open; the previous Access design is
-retained in the architecture as the proposed Access backend. Access-specific
-instructions below apply if that backend is implemented. The logical stage
-must not generate SQL or database files, and must preserve existing project
-identifier conventions. `inspect` remains the Milestone 1B read-only command;
-`prepare_tables(dataset, layout)` is a separate Python API.
+Milestone 1C introduces database-independent `PreparedTables`. Milestone 1D
+selects SQLite as the only supported database backend. Microsoft Access is no
+longer planned or supported. The logical stage must not generate SQL or database
+files. `prepare_tables(dataset, layout)` remains a separate Python API. `inspect`
+reads source data, `validate` exercises the complete export in memory, and `sync`
+publishes a verified SQLite snapshot using `sqlite.py`.
 
 `inventree-sync` must never modify InvenTree.
 
 Do not implement API operations which create, update, move, rename, or delete InvenTree objects unless a future task explicitly changes this architectural rule.
 
-The generated Microsoft Access `.accdb` database is a reproducible intermediate artifact.
+The generated SQLite `.sqlite` database is a reproducible intermediate artifact.
 
 It is not a source of truth.
 
 Manual changes made to the generated database are not preserved and must not be synchronized back to InvenTree.
 
-The Altium `.DbLib` consumes the generated Access database but is not a source of component data for `inventree-sync`.
+The Altium `.DbLib` consumes the generated SQLite database through the separately configured SQLite ODBC connection but is not a source of component data for `inventree-sync`. Never modify `.DbLib`, `.SchLib`, or `.PcbLib` files during synchronization. Do not synthesize a `Comment` column from `Value`; the tested schematic symbol Comment uses `=Value`. An explicit ordinary InvenTree `Comment` parameter is exported normally.
 
 ---
 
@@ -156,7 +155,7 @@ If the architecture document specifies a module responsibility, keep that respon
 
 The database schema must be derived from the actual parameters of exported InvenTree Parts.
 
-Only a leaf category containing at least one exported Part produces an Access component table.
+Only a leaf category containing at least one exported Part produces a SQLite component table.
 
 For each exported leaf category, the program must determine:
 
@@ -176,7 +175,7 @@ InvenTree already applies parameters inherited from higher-level categories to t
 
 Do not use category parameter assignments or a locally maintained category schema to determine columns.
 
-An empty leaf category produces no Access table and does not require schema discovery.
+An empty leaf category produces no SQLite table and does not require schema discovery.
 
 If an ordinary parameter exists on at least one Part in the category, it belongs to the table schema. Parts which do not contain that parameter receive Python `None` (eventually SQL `NULL`) for that column. Dynamic columns remain ordered by ParameterTemplate PK after the five technical columns.
 
@@ -203,7 +202,7 @@ Examples include:
 - Stock Items do not create component rows;
 - Supplier Parts do not create component rows;
 - Manufacturer Parts do not create component rows;
-- one non-empty exported leaf InvenTree category maps to one Access component table;
+- one non-empty exported leaf InvenTree category maps to one SQLite component table;
 - the table name is exactly the leaf category name;
 - invalid table names are validation errors and are not automatically rewritten.
 
@@ -256,7 +255,7 @@ In particular, do not automatically:
 
 - rename IPNs;
 - rename categories;
-- sanitize category names into different Access table names;
+- sanitize category names into different SQLite table names;
 - derive missing parameters from IPNs;
 - derive missing parameters from `Part.name`;
 - derive missing parameters from `Part.description`;
@@ -341,10 +340,10 @@ indexes from actual nested parameters and `template_detail`; conflicting
 template metadata or missing nested data must fail explicitly. Do not add
 automatic fallback or separate parameter/template requests to this path.
 Server-side filtering does not replace local category and Part validation.
-The read-only `inspect` command uses this workflow and must not create Access
+The read-only `inspect` command uses this workflow and must not create SQLite
 output or claim full validation/synchronization.
 
-Raw API JSON must not leak unnecessarily into category, schema, transformation, or Access-writing logic.
+Raw API JSON must not leak unnecessarily into category, schema, transformation, or SQLite-writing logic.
 
 Use the adapter layer for API-version-specific response structures.
 
@@ -365,21 +364,19 @@ Read operations must remain read-only.
 
 ---
 
-## 13. Microsoft Access safety
+## 13. SQLite generation and publication safety
 
-The generated `.accdb` is a build artifact.
+The generated `.sqlite` is a build artifact. Use only standard-library `sqlite3`; do not introduce backend selection, an ORM, database credentials or an external database-generation driver.
 
-Never modify the currently published production database incrementally unless the architecture explicitly requires it.
+Build a complete snapshot from `PreparedTables`, never incrementally modify the published database. All columns are `TEXT`; the five technical columns are `NOT NULL`, and `IPN` is `PRIMARY KEY COLLATE NOCASE`. Optional missing values become SQL `NULL`. Preserve prepared strings and units exactly; never reformat them in the writer. Enforce global case-insensitive IPN uniqueness across tables. Direct writer calls must validate manually constructed tables too.
 
-Follow the staging, validation, re-open verification, and atomic replacement strategy defined in `inventree-sync-design.md`.
+Create a unique staging file in the destination directory, use a transaction with DELETE rollback journaling and normal synchronization, commit and close it, reopen read-only and verify integrity, exact tables/schema/constraints and every stored value. Close verification before `os.replace`. Never publish an incomplete database. Do not add auxiliary user tables or columns.
 
-Do not create a zero-byte file with an `.accdb` extension and treat it as a database.
+Acquire an exclusive `<destination>.sync.lock` before staging/publication. Never remove a lock belonging to another active or potentially interrupted process. Recover stale locks manually only after confirming the owning process is stopped, as described in the architecture. Clean up only staging artifacts and locks owned by this operation.
 
-Use the configured real Access template.
+All configured filesystem paths are relative to the TOML directory. `[sync]` output/dblib and `[libraries]` symbols/footprints are required for validate/sync; inspect still supports only `[inventree]` and `[scope]`. No database file or output directory is created by validate.
 
-Do not delete Access lock files manually.
-
-Do not force-close Altium, Access, or another process holding the database.
+Do not force-close Altium or another process holding the database, and do not remove their lock/journal files.
 
 A failed synchronization must leave the previously published database intact.
 
@@ -395,9 +392,9 @@ Use parameterized queries for values.
 
 Never concatenate InvenTree parameter values directly into SQL statements.
 
-Do not silently truncate values to fit Access limits.
+Quote validated identifiers with SQLite double quotes, escaping embedded quotes. Retain the English category naming convention, reject sqlite_ internal table names and case-insensitive collisions. Access-specific reserved words and 64-character table/field limits no longer apply. Parameter names allow punctuation and Unicode, but not leading whitespace or control characters. Never silently rename identifiers or truncate values.
 
-If an Access size or schema limit is exceeded, fail validation or publication clearly.
+If the installed SQLite engine's schema or size limits are exceeded, fail validation or publication clearly.
 
 ---
 
@@ -467,13 +464,12 @@ Unit tests must not require:
 
 - access to the production InvenTree server;
 - real API credentials;
-- Microsoft Access;
-- Microsoft ACE;
+- a database ODBC driver;
 - Altium Designer.
 
 Use anonymized fixtures and mocks for these dependencies.
 
-Tests involving the real Windows / ACE / Altium environment should be clearly separated as integration tests.
+Tests involving the real Windows / ODBC / Altium environment should be clearly separated as integration tests.
 
 When fixing a bug, add a regression test whenever practical.
 
@@ -541,20 +537,14 @@ Do not commit generated synchronization output unless repository policy explicit
 Examples of files which are normally generated or local include:
 
 ```text
-database/components.accdb
-*.laccdb
-*.staging.accdb
-*.tmp.accdb
+database/components.sqlite
+*.staging.sqlite
+*.staging.sqlite-journal
+*.sync.lock
 tools/inventree-sync/config.toml
 ```
 
-A deliberately maintained technical template such as:
-
-```text
-database/templates/empty.accdb
-```
-
-is different from generated output and may be version controlled if that is the established repository convention.
+Do not remove unrelated historical artifacts as part of SQLite implementation or documentation cleanup. SQL fixtures and other intentionally maintained source files must remain trackable.
 
 Respect the repository `.gitignore`.
 
@@ -592,7 +582,7 @@ After implementing a task, provide a concise report containing:
 
 Do not present untested environment-specific behavior as verified.
 
-For example, mocked Access tests do not prove compatibility with the installed Microsoft ACE driver or Altium DbLib. Clearly distinguish unit-tested behavior from real integration verification.
+For example, SQLite unit tests do not prove compatibility with the installed SQLite ODBC driver or Altium DbLib. The user's successful sample-database ODBC test does not verify every generated production table. Clearly distinguish unit-tested behavior from real integration verification.
 
 ---
 

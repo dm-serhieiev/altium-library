@@ -3,7 +3,7 @@ from pathlib import Path
 
 import pytest
 
-from inventree_sync.config import ConfigError, InvenTreeSettings, load_config
+from inventree_sync.config import ConfigError, InvenTreeSettings, load_config, require_export_settings
 
 
 def write_config(tmp_path, server='', scope='root_category_path = ["Components", "Passives"]'):
@@ -86,4 +86,55 @@ def test_missing_sections_and_fields(tmp_path, runtime_token, content):
 def test_missing_file(tmp_path):
     with pytest.raises(ConfigError, match="Cannot read"):
         load_config(tmp_path / "missing.toml")
+
+
+def test_export_paths_are_relative_to_toml(export_config, tmp_path, monkeypatch):
+    unrelated = tmp_path / "working"
+    unrelated.mkdir()
+    monkeypatch.chdir(unrelated)
+    config = load_config(export_config)
+    sync, libraries = require_export_settings(config)
+    assert sync.output == tmp_path / "database" / "components.sqlite"
+    assert sync.dblib == tmp_path / "database" / "Components.DbLib"
+    assert libraries.symbols == tmp_path / "symbols"
+    assert libraries.footprints == tmp_path / "footprints"
+    assert not sync.dblib.exists()
+
+
+def test_inspect_only_configuration_still_supported(tmp_path, runtime_token):
+    config = load_config(write_config(tmp_path))
+    assert config.sync is None and config.libraries is None
+    with pytest.raises(ConfigError, match="validate/sync require"):
+        require_export_settings(config)
+
+
+@pytest.mark.parametrize("old,new,match", [
+    ('output = "../database/components.sqlite"', 'output = ""', "sync.output"),
+    ('output = "../database/components.sqlite"', 'output = 42', "sync.output"),
+    ('output = "../database/components.sqlite"', 'output = "   "', "sync.output"),
+    ('output = "../database/components.sqlite"', 'output = "bad\\u0000path"', "sync.output"),
+    ('dblib = "../database/Components.DbLib"', '', "sync"),
+    ('symbols = "../symbols"', '', "libraries"),
+    ('footprints = "../footprints"', 'footprints = false', "libraries.footprints"),
+    ('[sync]', '[sync]\ndriver = "not-needed"', "sync"),
+    ('[libraries]', '[libraries]\nprofile = "forbidden"', "libraries"),
+    ('[sync]', '[access]', "Unsupported configuration section"),
+])
+def test_invalid_export_settings(export_config, old, new, match):
+    export_config.write_text(export_config.read_text(encoding="utf-8").replace(old, new), encoding="utf-8")
+    with pytest.raises(ConfigError, match=match):
+        load_config(export_config)
+
+
+@pytest.mark.parametrize("target", ["../database/Components.DbLib", "config.toml", "../symbols/Passives.SchLib"])
+def test_output_cannot_overwrite_configuration_or_altium_libraries(export_config, target):
+    export_config.write_text(export_config.read_text(encoding="utf-8").replace("../database/components.sqlite", target), encoding="utf-8")
+    with pytest.raises(ConfigError, match="sync.output"):
+        require_export_settings(load_config(export_config))
+
+
+def test_absolute_paths_preserved(export_config, tmp_path):
+    destination = (tmp_path / "independent output" / "parts.sqlite").as_posix()
+    export_config.write_text(export_config.read_text(encoding="utf-8").replace("../database/components.sqlite", destination), encoding="utf-8")
+    assert load_config(export_config).sync.output == Path(destination)
 

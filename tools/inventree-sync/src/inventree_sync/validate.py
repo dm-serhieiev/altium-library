@@ -18,18 +18,13 @@ class ModelReferenceError(ExportValidationError):
 
 
 def validate_column_name(name: str) -> None:
-    """Keep the existing 64-character field-name contract, not table-name rules.
-
-    Restrictions originate in the architecture's Access field-name convention:
-    https://support.microsoft.com/en-us/access/guidelines-for-naming-fields-controls-and-objects
-    Reserved SQL words (including Value and Description) are valid field names.
-    """
+    """Preserve readable names; SQL punctuation and reserved words are quoted."""
     if (
         not isinstance(name, str) or not name or not name.strip()
-        or len(name) > 64 or name[0].isspace()
-        or any(c in ".!`[]" or ord(c) < 32 or ord(c) == 127 for c in name)
+        or name[0].isspace()
+        or any(ord(c) < 32 or 127 <= ord(c) < 160 for c in name)
     ):
-        raise SchemaError(f"Invalid output column name {name!r}; expected 1..64 characters without leading whitespace, controls or . ! ` [ ]")
+        raise SchemaError(f"Invalid output column name {name!r}; expected nonempty text without leading whitespace or controls")
 
 
 def validate_columns(columns: tuple[ColumnDefinition, ...], context: str) -> None:

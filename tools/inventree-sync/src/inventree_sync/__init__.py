@@ -1,4 +1,4 @@
-"""InvenTree read layer and logical Altium tables; database writing is not implemented."""
+"""One-way InvenTree retrieval, logical Altium tables and verified SQLite snapshots."""
 
 __version__ = "0.1.0"
 

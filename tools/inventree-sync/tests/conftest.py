@@ -81,3 +81,17 @@ def library_layout(tmp_path):
         (directory / filename).write_bytes(b"dummy library for file-existence tests only")
     return LibraryLayout(tmp_path / "database" / "Components.DbLib", symbols, footprints)
 
+
+@pytest.fixture
+def export_config(tmp_path, library_layout, runtime_token):
+    path = tmp_path / "settings" / "config.toml"
+    path.parent.mkdir()
+    path.write_text(
+        '[inventree]\nbase_url = "https://inventree.example.com"\n'
+        '[scope]\nroot_category_path = ["Components"]\n'
+        '[sync]\noutput = "../database/components.sqlite"\ndblib = "../database/Components.DbLib"\n'
+        '[libraries]\nsymbols = "../symbols"\nfootprints = "../footprints"\n',
+        encoding="utf-8",
+    )
+    return path
+

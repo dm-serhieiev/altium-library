@@ -1,4 +1,5 @@
-# Milestone 1B: read-only inspect. No component data or credentials belong here.
+# SQLite export. inspect also accepts only [inventree] and [scope].
+# Filesystem paths are relative to this TOML file. Credentials belong in env.
 [inventree]
 base_url = "https://inventree.example.com"
 auth = "token"
@@ -9,4 +10,12 @@ retries = 3
 
 [scope]
 root_category_path = ["Electronic Components"]
+
+[sync]
+output = "../../database/components.sqlite"
+dblib = "../../database/Components.DbLib"
+
+[libraries]
+symbols = "../../symbols"
+footprints = "../../footprints"
 

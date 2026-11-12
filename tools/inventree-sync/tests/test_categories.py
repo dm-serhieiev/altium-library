@@ -79,7 +79,7 @@ def test_invalid_part_placement(tree, part, expected):
     assert "path" in str(error.value)
 
 
-@pytest.mark.parametrize("name", ["", " A", "A ", "A  B", "A/B", "A.B", "A_B", "A\nB", "1A", "АBC", "A" * 65, "MSysData", "usysData", "Select", "table", "Value", "GROUP BY", "LongChar", "CreateTableDef"])
+@pytest.mark.parametrize("name", ["", " A", "A ", "A  B", "A/B", "A.B", "A_B", "A\nB", "1A", "АBC", "sqlite_sequence", "SQLITE_hidden"])
 def test_invalid_names(name):
     tree = build_category_tree([Category(1, "Root", None), Category(2, name, 1)])
     with pytest.raises(CategoryError) as error:
@@ -88,7 +88,7 @@ def test_invalid_names(name):
     assert "pk=2" in message and "name=" in message and "path=" in message
 
 
-@pytest.mark.parametrize("name", ["A", "A" * 64, "Fixed Resistors", "Current Sense and Shunt Resistors", "Aluminum Electrolytic Capacitors", "Select Parts"])
+@pytest.mark.parametrize("name", ["A", "A" * 64, "A" * 100, "Fixed Resistors", "Current Sense and Shunt Resistors", "Aluminum Electrolytic Capacitors", "Select Parts", "MSysData", "usysData", "Select", "table", "Value", "GROUP BY", "LongChar", "CreateTableDef"])
 def test_valid_names(name):
     validate_table_name(name)
 

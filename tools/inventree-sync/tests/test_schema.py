@@ -55,14 +55,14 @@ def test_empty_categories_do_not_discover_schema_or_validate_names(export_datase
     assert [s.name for s in build_table_schemas(dataset)] == ["Resistors"]
 
 
-@pytest.mark.parametrize("name", ["Value", "Description", "Power Rating", "Mounting Type", "Tolerance (%)", "Опір", "A" * 64])
+@pytest.mark.parametrize("name", ["Value", "Description", "Power Rating", "Mounting Type", "Tolerance (%)", "Опір", "A" * 64, "A" * 100, "Bad.Name", "Bad!Name", "Bad`Name", "Bad[Name", "Bad]Name", 'Quoted "Name"'])
 def test_exact_parameter_names_preserved(export_dataset, name):
     templates = {**export_dataset.templates, 30: ParameterTemplate(30, name), 35: ParameterTemplate(35, "Other Parameter")}
     schema = build_table_schemas(replace(export_dataset, templates=templates))[0]
     assert next(c for c in schema.columns if c.template_pk == 30).name == name
 
 
-@pytest.mark.parametrize("name", [None, "", " ", " Leading", "A" * 65, "Bad.Name", "Bad!Name", "Bad`Name", "Bad[Name", "Bad]Name", "Bad\nName", "Bad\x00Name", "Bad\x7fName"])
+@pytest.mark.parametrize("name", [None, "", " ", " Leading", "Bad\nName", "Bad\x00Name", "Bad\x7fName", "Bad\x85Name"])
 def test_invalid_column_name_has_source_context(export_dataset, name):
     dataset = replace(export_dataset, templates={**export_dataset.templates, 30: ParameterTemplate(30, name)})
     with pytest.raises(SchemaError) as error:

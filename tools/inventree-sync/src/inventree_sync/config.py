@@ -51,10 +51,53 @@ class ScopeSettings:
 
 
 @dataclass(frozen=True, slots=True)
+class SyncSettings:
+    output: Path
+    dblib: Path
+
+
+@dataclass(frozen=True, slots=True)
+class LibrarySettings:
+    symbols: Path
+    footprints: Path
+
+
+@dataclass(frozen=True, slots=True)
 class Config:
     source: Path
     inventree: InvenTreeSettings
     scope: ScopeSettings
+    sync: SyncSettings | None = None
+    libraries: LibrarySettings | None = None
+
+
+def require_export_settings(config: Config) -> tuple[SyncSettings, LibrarySettings]:
+    """Inspection still accepts the original two-section configuration."""
+    if config.sync is None or config.libraries is None:
+        raise ConfigError("validate/sync require [sync] output/dblib and [libraries] symbols/footprints")
+    if config.sync.output in (config.source, config.sync.dblib):
+        raise ConfigError("sync.output must differ from the configuration and sync.dblib paths")
+    if config.sync.output.suffix.casefold() in {".schlib", ".pcblib", ".dblib"}:
+        raise ConfigError("sync.output must be a database path, not an Altium library file")
+    return config.sync, config.libraries
+
+
+def _path_section(raw: dict, name: str, keys: tuple[str, ...], base: Path) -> dict[str, Path] | None:
+    if name not in raw:
+        return None
+    section = raw[name]
+    if not isinstance(section, dict) or set(section) != set(keys):
+        raise ConfigError(f"[{name}] requires only {', '.join(keys)}")
+    paths: dict[str, Path] = {}
+    for key in keys:
+        value = section[key]
+        if not isinstance(value, str) or not value.strip() or any(ord(c) < 32 or ord(c) == 127 for c in value):
+            raise ConfigError(f"{name}.{key}: expected a nonempty filesystem path without controls")
+        try:
+            paths[key] = (base / value).resolve()
+        except (OSError, ValueError):
+            raise ConfigError(f"{name}.{key}: cannot resolve filesystem path") from None
+    return paths
 
 
 def validate_base_url(value: str) -> None:
@@ -102,6 +145,8 @@ def load_config(path: str | Path) -> Config:
         raise ConfigError(f"Cannot read valid TOML configuration: {source}") from None
 
     sections: dict[str, dict] = {}
+    if set(raw) - {"inventree", "scope", "sync", "libraries"}:
+        raise ConfigError("Unsupported configuration section; only inventree, scope, sync and libraries are supported")
     for name in ("inventree", "scope"):
         section = raw.get(name)
         if not isinstance(section, dict):
@@ -120,7 +165,13 @@ def load_config(path: str | Path) -> Config:
     if "base_url" not in server:
         raise ConfigError("inventree.base_url is required")
     settings = InvenTreeSettings(**server)
-    result = Config(source, settings, ScopeSettings(tuple(root)))
+    sync = _path_section(raw, "sync", ("output", "dblib"), source.parent)
+    libraries = _path_section(raw, "libraries", ("symbols", "footprints"), source.parent)
+    result = Config(
+        source, settings, ScopeSettings(tuple(root)),
+        SyncSettings(**sync) if sync is not None else None,
+        LibrarySettings(**libraries) if libraries is not None else None,
+    )
     read_token(settings)  # Validate availability, but never retain it in Config.
     return result
 

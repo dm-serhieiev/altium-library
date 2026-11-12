@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "inventree-sync"
 version = "0.1.0"
-description = "Read-only InvenTree foundation for the Altium library"
+description = "One-way InvenTree to SQLite synchronization for Altium DbLib"
 requires-python = ">=3.11"
 dependencies = ["requests==2.34.2"]
 

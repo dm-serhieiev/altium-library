@@ -1,10 +1,10 @@
 # Архітектура inventree-sync: InvenTree → таблиці компонентів → Altium DbLib
 
-Статус: Milestone 1A реалізував основу й API-клієнт; Milestone 1B — читання вибраного піддерева та команду `inspect`; Milestone 1C — динамічні логічні схеми, Altium-перетворення й перевірені таблиці в пам'яті. Запис бази даних і налаштування DbLib залишаються наступними етапами.
+Статус: Milestone 1A — основа й API-клієнт; Milestone 1B — scoped retrieval та `inspect`; Milestone 1C — динамічна схема, Altium-перетворення та unit-aware `PreparedTables`; Milestone 1D — SQLite writer, перевірка, безпечна публікація та робочі `validate`/`sync`.
 
 Назва програми та console command — `inventree-sync`, назва Python-пакета — `inventree_sync`. Синхронізація одностороння: InvenTree є джерелом істини, згенерована база — відтворюваним проміжним артефактом для Altium DbLib. Скрипт читає InvenTree і не змінює його категорії або компоненти.
 
-Історичний вибір Microsoft Access `.accdb` і проєкт його безпечного запису збережено нижче. Завдання Milestone 1C повторно відкриває вибір **Access або SQLite**: шар `PreparedDataset → PreparedTables` незалежний від backend. SQL, типи й ліміти сховища, драйвери та публікація належать майбутньому writer. Наявні конвенції назв таблиць і полів залишаються чинними для обох варіантів; рішення щодо SQLite writer або його сумісності з Altium ще не прийнято.
+**SQLite — остаточно вибраний і єдиний підтримуваний backend. Microsoft Access більше не планується і не підтримується `inventree-sync`.** Шар `PreparedDataset → PreparedTables` залишається незалежним від SQL. `sqlite.py` використовує стандартний Python `sqlite3` без зовнішнього драйвера для генерації. Користувач підтвердив успішне підключення sample SQLite database до Altium DbLib через SQLite ODBC; перевірка нового згенерованого production snapshot в Altium залишається ручною інтеграційною перевіркою. Історію попереднього рішення коротко зафіксовано в розділі 10.
 
 ## 1. Контракт і джерела правил
 
@@ -38,7 +38,7 @@ tools/inventree-sync/
 ├── src/inventree_sync/
 │   ├── __init__.py
 │   ├── __main__.py        # виклик CLI
-│   ├── cli.py             # inspect; validate/sync поки не реалізовані
+│   ├── cli.py             # inspect, validate, sync та console summaries
 │   ├── config.py          # TOML, env, перевірка конфігурації
 │   ├── api.py             # HTTP, auth, timeout, retry, pagination
 │   ├── adapters.py        # особливості версій REST API
@@ -48,7 +48,7 @@ tools/inventree-sync/
 │   ├── schema.py          # build_table_schemas: union фактичних параметрів → логічні колонки
 │   ├── transform.py       # parse_model_ref, LibraryLayout, prepare_tables
 │   ├── validate.py        # логічна перевірка колонок, посилань і рядків
-│   ├── access.py          # запланований варіант Access writer; ще не реалізований
+│   ├── sqlite.py          # TEXT schema, insert, verify, destination lock, atomic publish
 │   ├── report.py          # майбутній JSON-звіт і маніфест
 │   └── pipeline.py        # майбутня послідовність повного експорту
 └── tests/
@@ -60,12 +60,10 @@ tools/inventree-sync/
     ├── test_schema.py
     ├── test_transform.py
     ├── test_validate.py
-    └── test_sync.py       # майбутні тести запису/публікації
+    └── test_sqlite.py     # round-trip, constraints, verification, publication failures
 ```
 
-Залежності: Python 3.11+ (`tomllib`, `dataclasses`, `argparse`, `pathlib`, `logging`), `requests` для HTTP, `pytest` для тестування; поточні версії зафіксовані в `pyproject.toml`. Milestone 1C не додає залежностей і не імпортує `sqlite3` або `pyodbc`. У разі вибору Access його writer потребуватиме Windows, `pyodbc` і Microsoft Access Database Engine відповідної розрядності.
-
-Для майбутнього запису Access із сучасним 64-бітним Altium обираємо 64-бітні Python та ACE; перед записом перевірятимемо драйвер `Microsoft Access Driver (*.mdb, *.accdb)`. Команда `inspect` не потребує `pyodbc`, ACE або Altium. Access Runtime включає ODBC/OLE DB-компоненти, але його сумісність із установленим Office потрібно перевірити перед установленням. [Microsoft Access Runtime](https://support.microsoft.com/en-us/access/download-and-install-microsoft-365-access-runtime), [розрядність рушія для Altium](https://www.altium.com/documentation/altium-designer/components-libraries/database-libraries/using-32-64-bit-altium-designer-same-computer).
+Залежності: Python 3.11+ (`tomllib`, `dataclasses`, `argparse`, `pathlib`, `logging`, `sqlite3`), `requests` для HTTP, `pytest` для тестування; версії зафіксовані в `pyproject.toml`. Генерація та unit-тести не потребують Altium або ODBC-драйвера. SQLite ODBC потрібен тільки споживачу Altium DbLib і налаштовується вручну.
 
 Основні контракти функцій:
 
@@ -86,9 +84,8 @@ def resolve_model_path(ref: ModelRef, layout: LibraryLayout) -> str: ...
 def format_parameter_value(data: str | None, units: str | None) -> str | None: ...
 def prepare_tables(dataset: PreparedDataset, layout: LibraryLayout) -> PreparedTables: ...
 def validate_table_name(category_name: str) -> None: ...
-# Заплановані контракти writer/pipeline:
-def write_access_database(dataset, template, destination): ...
-def sync(config) -> SyncReport: ...
+def validate_sqlite_tables(prepared: PreparedTables) -> None: ...
+def write_sqlite_database(prepared: PreparedTables, destination: Path) -> None: ...
 ```
 
 HTTP-відповіді нормалізує `adapters.py`; решта програми не залежить від конкретного JSON API. Внутрішні індекси: `categories[pk]`, `parts[pk]`, `templates[pk]`, `parameters[part_pk][template_pk]`.
@@ -128,7 +125,7 @@ HTTP-політика: перевірка TLS увімкнена, connect/read t
 - Кожний вкладений параметр повинен містити об'єкт `template_detail` з `pk`, текстовим `name` і текстовим `units` (порожній рядок допустимий). `template_detail.pk` дорівнює `template`. Підтримувані метадані — PK/name/units; довільні додаткові поля не копіюються у внутрішні моделі.
 - Повтор параметра за PK або повтор template на одному Part — помилка. Спільний template PK між різними Parts допустимий лише за однакових name/units; конфлікт завершує читання з контекстом обох Parts і template PK.
 
-`retrieval.retrieve_dataset(config_path)` завантажує конфігурацію, відкриває клієнт, читає категорії, визначає root PK, читає scoped Parts, створює спільні індекси й викликає наявний `group_parts`. Повертається `PreparedDataset` із деревом, root PK, множиною PK піддерева, `parts[pk]`, `parameters[part_pk][template_pk]`, `templates[pk]` та групами непорожніх leaf-категорій. Індекси доступні лише для читання. Частковий набір при помилці не повертається; клієнт закривається і при успіху, і при помилці. Генерації колонок, Access-запису та Altium-перетворень тут немає.
+`retrieval.retrieve_dataset(config_path)` завантажує конфігурацію, відкриває клієнт, читає категорії, визначає root PK, читає scoped Parts, створює спільні індекси й викликає наявний `group_parts`. Повертається `PreparedDataset` із деревом, root PK, множиною PK піддерева, `parts[pk]`, `parameters[part_pk][template_pk]`, `templates[pk]` та групами непорожніх leaf-категорій. Індекси доступні лише для читання. Частковий набір при помилці не повертається; клієнт закривається і при успіху, і при помилці. Генерації колонок, SQLite-запису та Altium-перетворень тут немає.
 
 ## 4. Категорії та таблиці компонентів
 
@@ -140,19 +137,19 @@ Leaf-категорія визначається відсутністю дочі
 
 Назва кожної логічної таблиці точно дорівнює фактичному `category.name`, отриманому з InvenTree. Поточні назви категорій можуть бути задокументовані окремо для людини, але документація не підміняє серверні дані і не бере участі у побудові схеми.
 
-Правила проєкту для назв експортованих категорій, сумісні з Access:
+Правила проєкту для назв експортованих категорій:
 
-- Від 1 до 64 символів; англійські літери, цифри й одиночні внутрішні пробіли. Формальна перевірка: `[A-Za-z][A-Za-z0-9]*(?: [A-Za-z0-9]+)*` плюс перевірка довжини.
-- Без початкових/кінцевих пробілів, керувальних символів і пунктуації. Це свідомо вужчий набір, ніж усі дозволені Access символи; він усуває неоднозначності SQL та драйверів.
+- Англійські літери, цифри й одиночні внутрішні пробіли. Формальна перевірка: `[A-Za-z][A-Za-z0-9]*(?: [A-Za-z0-9]+)*`. Немає колишнього ліміту 64 символи.
+- Без початкових/кінцевих пробілів, керувальних символів і пунктуації. Це конвенція читабельності, яка свідомо вужча за можливості SQLite.
 - Назви експортованих leaf-категорій мають бути унікальні без урахування регістру, навіть якщо вони розташовані в різних гілках.
-- Зарезервовані слова Access/ACE та системні префікси `MSys`/`USys` не використовуються для таблиць компонентів.
+- Префікс `sqlite_` зарезервовано SQLite і явно відхиляється без урахування регістру. Колишні reserved words та префікси `MSys`/`USys` більше не обмежують таблиці; `Select`, `Value`, `GROUP BY` дозволені.
 - Скрипт не скорочує, не транслітерує і не додає PK до назв таблиць. Порушення — помилка з category PK і повним шляхом; виправлення має відбутися в InvenTree до синхронізації.
 
-Access дозволяє імена об'єктів до 64 символів і підтримує пробіли. Власні назви SQL завжди обрамляються квадратними дужками після валідації, наприклад `[Fixed Resistors]`. Дужки не є частиною назви таблиці. [Правила Microsoft для імен](https://support.microsoft.com/en-us/access/guidelines-for-naming-fields-controls-and-objects), [створення й найменування таблиць](https://support.microsoft.com/en-us/access/create-a-table-and-add-fields).
+Writer обрамляє ідентифікатори подвійними лапками й подвоює внутрішні лапки. SQL values передаються виключно через placeholders `?`; ідентифікатори не можуть бути SQL value parameters.
 
-Маніфест зберігає category PK/full path/table name для кожної експортованої категорії. Після перейменування категорії в InvenTree наступна повна синхронізація створює таблицю з новою назвою; mapping відповідної таблиці в DbLib також потребує оновлення. Попередня назва не зберігається як alias.
+Після перейменування категорії в InvenTree наступна повна синхронізація створює таблицю з новою назвою; mapping відповідної таблиці в DbLib також потребує ручного оновлення. Попередня назва не зберігається як alias.
 
-Службові дані записуються в JSON поруч, без додаткових користувацьких таблиць. Системні таблиці Access не є таблицями компонентів. Якщо після застосування scope і export-фільтрів немає жодного Part у leaf-категоріях, синхронізація завершується помилкою конфігурації/даних.
+База містить тільки поточні компонентні таблиці. JSON manifest та audit report відкладені; Milestone 1D виводить console summary. Якщо в scope немає жодного Part у leaf-категоріях, синхронізація завершується помилкою конфігурації/даних.
 
 ---
 
@@ -178,13 +175,13 @@ InvenTree під час створення Part додає до нього па�
 
 Назви колонок параметрів залишаються точними іменами `ParameterTemplate` з InvenTree. Скрипт не перейменовує `Power Rating` у `Power`, `Mounting Type` у `Mount` тощо.
 
-Якщо звичайний параметр присутній хоча б на одному експортованому Part у категорії, відповідна колонка входить до таблиці. Виняток — точні імена `KiCad Symbol`, `KiCad Footprint`, `Altium Symbol`, `Altium Footprint`: `schema.EXCLUDED_EXPORT_PARAMETERS` виключає їх до формування колонок. Це фіксований контракт експорту, не конфігурація категорій. Усі інші параметри залишаються динамічними. Якщо конкретний Part параметра не має, значення для його рядка — Python `None`; майбутній writer перетворить його на SQL NULL. Порожній рядок необов'язкового параметра також стає `None`; самі пробіли зберігаються дослівно навіть за наявності units. Форматування непорожніх значень описане нижче.
+Якщо звичайний параметр присутній хоча б на одному експортованому Part у категорії, відповідна колонка входить до таблиці. Виняток — точні імена `KiCad Symbol`, `KiCad Footprint`, `Altium Symbol`, `Altium Footprint`: `schema.EXCLUDED_EXPORT_PARAMETERS` виключає їх до формування колонок. Це фіксований контракт експорту, не конфігурація категорій. Усі інші параметри залишаються динамічними. Якщо конкретний Part параметра не має, значення для його рядка — Python `None`; SQLite writer перетворює його на SQL NULL. Порожній рядок необов'язкового параметра також стає `None`; самі пробіли зберігаються дослівно навіть за наявності units. Форматування непорожніх значень описане нижче.
 
 Порожня leaf-категорія не створює таблиці і не потребує визначення schema.
 
 Один і той самий `ParameterTemplate` дає одну колонку. Дубль параметра того самого template на одному Part, два різні templates з однаковим ім'ям без урахування регістру або колізія імені параметра з технічною колонкою — помилка, без перезаписування значень.
 
-Контракт імен полів: непорожній текст до 64 символів, без початкових пробілів, ASCII-керувальних символів (0–31, 127), крапки, `!`, зворотного апострофа та квадратних дужок. Конвенція назв **категорій** на поля не переноситься. `Value`, `Description`, пробіли всередині назв і Unicode підтримуються; SQL reserved words не забороняються для полів. Quoting ідентифікаторів належить writer. Ліміти кількості колонок і довжини значень конкретної БД у Milestone 1C не застосовуються.
+Контракт імен полів: непорожній текст без початкових пробілів і керувальних символів (U+0000–001F, U+007F–009F). Конвенція назв **категорій** на поля не переноситься. Unicode, внутрішні пробіли, reserved words і пунктуація включно з подвійними лапками підтримуються. Ліміт 64 символи та заборони пунктуації попереднього backend скасовані. Колізії перевіряються через `casefold`. Quoting ідентифікаторів належить writer. Milestone 1C не застосовує storage limits; 1D перевіряє сумісність із фактично встановленим SQLite engine у пам'яті.
 
 Кожне посилання на template має існувати у спільному індексі; PK ключа/об'єкта повинні збігатися, а параметр має належати відповідному Part. Ці перевірки виконуються до виключення CAD-параметрів і охоплюють також їх. Усі значення — `str | None`. Виключені параметри та їхні templates залишаються доступними у вихідному `PreparedDataset`.
 
@@ -226,9 +223,9 @@ Altium Footprint = Resistors:RES_0603_H0.55
 
 `parse_model_ref(value, kind)` підтримує `symbol` і `footprint` та повертає незмінний `ModelRef(kind, library_filename, model_name)`. Розширення дописується тільки коли воно відсутнє; явне розширення має бути точно `.SchLib` або `.PcbLib`. Пробіли не обрізаються, регістр і назва моделі не виправляються. Basename — PascalCase/акронім із можливими `_Qualifier`; символ — слова з великими початковими літерами/акроніми та числові кваліфікатори через `_` (однолітерні `R`, `C`, `L` відхиляються); footprint — великі ASCII-літери, цифри, `_`, десяткові крапки й дефіси між непорожніми частинами. Переліків дозволених сімейств немає: IC, connector і manufacturer-specific моделі підтримуються. Семантика електричної функції, механічних розмірів і варіантів не визначається з імені.
 
-При розташуванні `database/Components.DbLib` і `database/components.accdb`:
+При розташуванні `database/Components.DbLib` і `database/components.sqlite`:
 
-| Поле Access | Приклад | Mapping у DbLib |
+| Поле SQLite | Приклад | Mapping у DbLib |
 |---|---|---|
 | IPN | RES-10K-1%-0603 | ключ запису; параметр IPN |
 | Library Ref | Resistor | [Library Ref] |
@@ -244,7 +241,7 @@ Altium Footprint = Resistors:RES_0603_H0.55
 
 `IPN` — ідентифікатор запису бази, `Library Ref` — назва спільного символу. Вони не повинні збігатися. `Altium Symbol` і `Altium Footprint` є лише джерелами чотирьох технічних полів і не експортуються як окремі колонки. `KiCad Symbol` і `KiCad Footprint` ігноруються Altium-перетворенням.
 
-`Comment` або `Description`, якщо потрібні, беруться лише з однойменних параметрів Part, отриманих з InvenTree, і налаштовуються в mapping DbLib. Скрипт не вигадує їх із `Part.name`, `Part.description` або IPN. Mapping `Value` на Comment можна окремо налаштувати в DbLib як свідомий вибір.
+`Comment` або `Description` експортуються лише за наявності однойменних звичайних параметрів Part. Скрипт не генерує `Comment` з `Value`, `Part.name`, `Part.description` або IPN. Перевірений користувачем підхід використовує Comment string символу `=Value`, що посилається на звичайний database parameter `Value`. Скрипт не змінює `.SchLib` для цього налаштування.
 
 Відносні шляхи обчислювати від папки цільового DbLib, не від робочої директорії процесу. Перевіряти існування файлів бібліотек. Перевірка наявності самого символу/footprint усередині бінарної бібліотеки потребує окремого Altium-індексу чи спеціалізованого парсера; перевірка файлу не доводить наявність моделі.
 
@@ -281,55 +278,53 @@ print([column.name for column in table.columns])
 print(dict(table.rows[0]))  # зручний breakpoint для перегляду результату
 ```
 
-`inspect` зберігає поведінку Milestone 1B і не викликає `prepare_tables`. Немає нової CLI-команди або нових TOML-параметрів. `validate`/`sync` залишаються явно нереалізованими до завершення writer та інтеграційних перевірок. Наступний етап має вибрати backend, відобразити логічні колонки на типи/ліміти сховища й реалізувати безпечний запис та перевірку результату.
+`inspect` зберігає поведінку Milestone 1B і не викликає `prepare_tables`. Milestone 1D додає файлові налаштування для `validate`/`sync` і реалізує SQLite writer нижче. Підготовлені таблиці залишаються окремим public Python API.
 
-У разі вибору Access збережений план DbLib такий: підключити `database/components.accdb` через сумісний Access OLE DB/ODBC-провайдер, увімкнути таблиці експортованих непорожніх leaf-категорій, призначити ключ `IPN` та наведені mappings. Назви таблиць не мають суфікса `$`. Поля Access не містять квадратних дужок у своїх назвах — у колонці mapping вони позначають спеціальні цілі Altium. `.accdb` є джерелом даних; `.DbLib` окремо містить підключення й mapping. [Офіційна документація Altium](https://www.altium.com/documentation/altium-designer/components-libraries/database-libraries/creating-defining).
+## 7. SQLite writer і безпечна публікація
 
-## 7. Схема і надійний запис Microsoft Access
+`sqlite.write_sqlite_database(prepared, destination)` приймає лише готові `PreparedTables`. Він не виконує HTTP, не реконструює успадкування, не форматує units, не розбирає model refs повторно і не змінює `.DbLib`, `.SchLib` або `.PcbLib`.
 
-Це збережений проєкт **можливого Access backend**, а не поведінка Milestone 1C. Типи, SQL, ліміти сховища, транзакції та публікація нижче ще не реалізовані. Вибір Access/SQLite залишається відкритим; вимоги безпеки цього розділу застосовуються при реалізації Access writer.
+### 7.1. Схема та перевірка public boundary
 
-Файл має формат `.accdb`. Для створення тимчасової бази копіювати заздалегідь підготовлений порожній Access-файл, заданий через `access.template`. Його потрібно один раз створити у Microsoft Access та зберегти як технічний шаблон без користувацьких таблиць, зв'язків, запитів і макросів. Нульовий файл із розширенням `.accdb` не є базою; ODBC-підключення не замінює її створення. Відсутній або некоректний шаблон — помилка preflight; шаблон не змінюється.
+Одна непорожня `PreparedTable` → одна таблиця з точною назвою та впорядкованими колонками. Порожній export/table, дубль category PK, case-insensitive колізія table/column names, неправильні technical columns, CAD source columns, некоректний template PK або malformed row — `ExportValidationError`. Використовуються спільні `validate_columns`, `validate_row` та `validate_table_name`; row keys мають точно відповідати порядку колонок. Технічні значення непорожні, всі non-null values — рядки. IPN глобально унікальні через `casefold`, як у retrieval; написання зберігається.
 
-Підключення Python до тимчасової бази через `pyodbc`:
+| Колонка | SQLite декларація |
+|---|---|
+| IPN | `TEXT NOT NULL PRIMARY KEY COLLATE NOCASE` |
+| Library Ref, Library Path, Footprint Ref, Footprint Path | `TEXT NOT NULL` |
+| Звичайні динамічні параметри | `TEXT`, nullable |
 
-```text
-DRIVER={Microsoft Access Driver (*.mdb, *.accdb)};DBQ=<absolute-path-to-staging.accdb>;
-```
+SQLite `NOCASE` забезпечує ASCII case-insensitive PK; Python global `casefold` перевірка додатково зберігає попередній контракт для всього набору. Додаткові identifiers/лічильники, поля, triggers або user tables не створюються. SQLite автоматично створює службовий PK index; це не компонентна таблиця.
 
-Рядок підключення будується з коректним ODBC-екрануванням значень. Шлях до бази не підставляється у SQL.
+`quote_identifier()` перевіряє ім'я й подвоює внутрішні подвійні лапки. SQL values завжди передаються через `?` та `executemany`. Усі підготовлені рядки, включно з `0603`, `1E3`, `=Value`, апострофами, Unicode, довгим текстом та unit-aware значеннями, записуються без перетворення. Python `None` → SQL NULL. Порядок insertion відповідає `PreparedTables`, але reading має явно використовувати `ORDER BY "IPN"`.
 
-| Група полів | Тип Access | Правила |
-|---|---|---|
-| IPN | Short Text / `TEXT(255)` | NOT NULL, PRIMARY KEY; непорожній; унікальний також між таблицями |
-| Library Ref, Library Path, Footprint Ref, Footprint Path | Short Text / `TEXT(255)` | обов'язкові непорожні значення; понад 255 символів — помилка |
-| Звичайні параметри InvenTree, включно з Value та Package; без чотирьох CAD source parameters | Long Text / `LONGCHAR` | остаточний текст із PreparedTables або NULL; без числового перетворення й обрізання |
+`validate_sqlite_tables(prepared)` спочатку перевіряє логічні invariants, потім створює реальну схему, вставляє й перевіряє всі рядки у `:memory:`. Немає filesystem artifacts або output-directory creation. Це також виявляє schema/size limits встановленого SQLite engine (наприклад кількість колонок), без локально вигаданих limits. Помилки сумісності — data validation error, а не truncation.
 
-Long Text для параметрів дозволяє не підбирати типи за першими записами й не втрачати довгі описи. Для таких полів не створюються індекси. Сумісність читання Long Text конкретним DbLib-провайдером перевіряється інтеграційним тестом. Якщо в майбутньому для окремого технічного випадку знадобиться Short Text, це має бути явним налаштуванням формату експорту, а не локальним дублем метаданих параметра InvenTree.
+### 7.2. Staging, verification та replacement
 
-Значення передаються як Python `str`, а відсутнє/порожнє необов'язкове значення — як `None` → SQL NULL. Writer зберігає вже форматовані рядки `PreparedTables` без змін і без додавання апострофів. `0603`, `1%`, `1E3` і `=...` без units лишаються текстом; одиниці додає лише шар перетворення за правилами розділу 5.1.
+1. Повністю перевірити export у пам'яті. За потреби створити директорію результату.
+2. Ексклюзивно створити `<destination>.sync.lock` через стандартний `os.open(O_CREAT | O_EXCL)` і записати PID. Одночасні writer calls до того самого resolved destination відхиляються.
+3. Створити у цій самій директорії унікальний `.<destination>.<random>.staging.sqlite` через `tempfile.mkstemp`. Інші staging files не зачіпаються.
+4. Відкрити SQLite, установити `journal_mode=DELETE` і `synchronous=FULL`. Явна transaction охоплює DDL та INSERT; commit або rollback, потім закриття connection. WAL не використовується.
+5. Повторно відкрити staging через escaped file URI з `mode=ro`. Вимагати `PRAGMA integrity_check` = `ok` і DELETE journal mode.
+6. Перевірити точний набір schema objects/table names; ordered columns через `table_xinfo`, TEXT types, nullability, default/PK/hidden flags; єдиний PK index та його NOCASE collation через `index_list`/`index_xinfo`.
+7. Явно вибрати всі ordered columns з `ORDER BY "IPN"`. Порівняти count, кожний IPN та кожне значення/NULL з `PreparedTables`. Expected ordering відтворює SQLite ASCII NOCASE; числової конверсії немає.
+8. Закрити verification connection. Виконати `os.replace(staging, destination)` на тому самому filesystem. Це єдина зміна published database.
+9. Видалити лише власні staging/journal artifacts і власний lock. Ідентичність lock перевіряється перед видаленням; чужий replacement lock не видаляється.
 
-Основою є `data` параметра, а не числове `data_numeric`. Не конвертувати одиниці, десяткові роздільники чи префікси автоматично; відсутні одиниці додає transformation із метаданих ParameterTemplate, отриманих з InvenTree. Writer не форматує їх повторно. SQL NULL не замінювати на `0` або текстові `None`/`NaN`.
+Помилки creation/insertion/commit/verification/replacement не змінюють попередній published file. Якщо Windows/Altium/інший процес блокує replacement, повертається зрозуміла помилка з destination; нікого не закриваємо примусово й не видаляємо чужі journal/lock files. Якщо після успішної публікації не вдалося прибрати власний lock, помилка прямо вказує, що файл уже опубліковано, але cleanup не завершено.
 
-Назви полів — точні назви параметрів; вони перевіряються на обмеження Access, довжину до 64 символів і колізії без урахування регістру. Конвенція назв категорій не перейменовує поля параметрів. Неприпустимі назви — помилка, без автоматичних aliases. Імена таблиць/полів обрамляються `[...]`; значення передаються виключно через placeholders `?`:
+Кожен успішний sync — повна перебудова: видалені/переміщені Parts, видалені параметри, порожні категорії та старі назви таблиць не залишаються у новому snapshot. Ручні зміни вихідної бази не зберігаються.
 
-```sql
-INSERT INTO [Fixed Resistors] ([IPN], [Package], [Value]) VALUES (?, ?, ?)
-```
+### 7.3. Відновлення після помилки
 
-Ідентифікатори не можна передати як SQL-параметри, тому їхня валідація обов'язкова перед побудовою DDL/DML. Заголовки є полями схеми; додатковий запис із назвами полів не створюється. Access не гарантує порядок записів: читати з `ORDER BY [IPN]`, якщо потрібен стабільний порядок.
+При data validation error виправити InvenTree або конфігурацію й повторити `validate`, потім `sync`. Попередня база зберігається. При publication error закрити споживача бази звичайним способом і повторити sync.
 
-Враховувати ліміти Access: максимум 255 полів у таблиці, 255 символів у Short Text і 2 GB на файл мінус системні об'єкти. Контролювати розмір бази та помилки місткості записів/рушія; жодне перевищення не призводить до обрізання або часткової публікації. [Специфікація Microsoft Access](https://support.microsoft.com/en-us/access/access-specifications).
+Lock не знімається автоматично за віком або PID: це може бути активний чи перерваний процес. Для stale `<destination>.sync.lock` перевірити записаний PID та переконатися, що жоден sync до цього destination не працює, зокрема в іншій сесії. Лише тоді вручну видалити цей lock. Після аварійного завершення можуть залишитися унікальні staging files; після тієї самої перевірки прибрати лише підтверджені abandoned staging artifacts, ніколи published database або SQLite journal іншого застосунку. Відновлення staging не виконується; наступний sync будує новий snapshot.
 
-Кожен запуск формує повний знімок: копіювати порожній шаблон у тимчасовий `.accdb` у директорії результату, створити схему, вставити дані з `autocommit=False`, виконати commit. При помилці — rollback записів і відхилення тимчасової бази; не покладатися на транзакційність DDL для захисту попереднього результату. Потім закрити з'єднання, повторно відкрити базу й перевірити точний набір користувацьких таблиць, типи полів, кількість записів, IPN та збережені значення.
+## 8. Конфігурація, CLI та Altium
 
-Після перевірки закрити всі власні cursors/connections і атомарно замінити цільовий `.accdb` у тій самій файловій системі. Якщо Access/Altium утримує файл, завершитися з помилкою без видалення lock-файлів чи примусового закриття сторонніх процесів. Попередній файл зберігається. Паралельні запуски для одного destination забороняються власним блокуванням програми. Маніфест містить hash готового ACCDB для перевірки відповідності звіту.
-
-Повна перебудова відображає видалення Parts, переміщення між категоріями та зміни схеми без застарілих записів. Вихідна база належить `inventree-sync`: ручні зміни в ній не є джерелом даних і будуть замінені наступною успішною синхронізацією.
-
-## 8. Конфігурація та запуск
-
-Нижче збережено приклад цільової конфігурації попереднього Access-дизайну. Реалізована команда `inspect` використовує лише `[inventree]` і `[scope]`, як у `tools/inventree-sync/config.example.toml`; файлові секції належать наступним етапам. Milestone 1C отримує шляхи через `LibraryLayout`, не розширюючи TOML:
+Вміст `tools/inventree-sync/config.example.toml`:
 
 ```toml
 [inventree]
@@ -342,40 +337,21 @@ retries = 3
 
 [scope]
 root_category_path = ["Electronic Components"]
-# Синтаксис майбутнього режиму all ще не визначено; він не реалізований.
 
 [sync]
-output = "../../database/components.accdb"
+output = "../../database/components.sqlite"
 dblib = "../../database/Components.DbLib"
-
-[access]
-template = "../../database/templates/empty.accdb"
-driver = "Microsoft Access Driver (*.mdb, *.accdb)"
 
 [libraries]
 symbols = "../../symbols"
 footprints = "../../footprints"
 ```
 
-Усі майбутні файлові шляхи конфігурації будуть відносні до самого TOML. Кореневий шлях категорії має знаходити рівно один вузол; зараз підтримується лише цей режим. Режим усієї бази залишається відкладеним рішенням, зокрема його TOML-синтаксис і перевірка некатегоризованих Parts. У режимі піддерева summary явно показує межу читання. Порожні leaf-категорії завжди ігноруються і окремої опції для їх експорту немає. Конфігурація задає лише підключення, область синхронізації та технічні параметри експорту. Вона не містить списків категорій, параметрів, units, choices або успадкування.
+Усі filesystem paths прив'язуються до директорії TOML через `pathlib.Path.resolve()`, а не до cwd, Python або модуля CLI. Абсолютні шляхи також допустимі. SQLite output незалежний від DbLib; DbLib і його папка можуть ще не існувати. Output не може збігатися з конфігурацією/DbLib або мати розширення Altium library. `sync` за потреби створює output directory, `validate` її не створює.
 
-CLI:
+`inspect` приймає попередню конфігурацію лише з `[inventree]` і `[scope]`. Для `validate`/`sync` обов'язкові обидві секції `[sync]` та `[libraries]` з усіма ключами. Невідомі sections/settings відхиляються без виведення їхніх значень. Немає backend selector, driver, DSN, database credentials або category/parameter/unit profiles у конфігурації. SQLite ODBC connection налаштовується окремо у споживача.
 
-```text
-inventree-sync inspect --config config.toml
-inventree-sync validate --config config.toml
-inventree-sync sync --config config.toml
-# Еквівалентний виклик Python-пакета:
-python -m inventree_sync inspect --config config.toml
-```
-
-`inspect` виконує повне читання і структурну перевірку Milestone 1B. При успіху виводить кореневу категорію/PK/шлях, кількість категорій у піддереві, Parts, експортованих leaf-категорій, фактичних параметрів і різних шаблонів, а також підтвердження вкладеного читання. Код `0` повертається тільки після завершення всіх сторінок і перевірок. Помилка конфігурації/даних → `2`; HTTP або непідтримувана структура API → `3`; неочікувана помилка → `1`. Secrets і raw responses не виводяться.
-
-`validate` і `sync` поки явно повертають `not implemented` із ненульовим кодом. Їхній майбутній контракт: `validate` перевіряє драйвер, шаблон і весь набір без заміни ACCDB; `sync` додатково публікує базу. На рівні повного експорту обов'язкові `IPN`, `Altium Symbol` і `Altium Footprint`, але `inspect` поки не перевіряє Altium-посилання. Для інших параметрів не відтворюється required-логіка category assignments. Console command: `[project.scripts]`, `inventree-sync = "inventree_sync.cli:main"`.
-
-### Ручний запуск inspect на сервері
-
-У PowerShell із кореня репозиторію (середовище створюється лише за його відсутності):
+Із кореня репозиторію у PowerShell (копіювати config лише за його відсутності):
 
 ```powershell
 if (-not (Test-Path -LiteralPath ./tools/inventree-sync/.venv)) {
@@ -385,58 +361,49 @@ if (-not (Test-Path -LiteralPath ./tools/inventree-sync/.venv)) {
 if (-not (Test-Path -LiteralPath ./tools/inventree-sync/config.toml)) {
     Copy-Item ./tools/inventree-sync/config.example.toml ./tools/inventree-sync/config.toml
 }
-```
-
-Копіювати приклад лише якщо локального `config.toml` ще немає. У ньому вказати реальні `base_url` сервера (без суфікса `/api/`) та `root_category_path`. Файл ігнорується Git. Якщо токен уже заданий у змінній середовища `INVENTREE_API_TOKEN`:
-
-```powershell
 & ./tools/inventree-sync/.venv/Scripts/inventree-sync.exe inspect --config ./tools/inventree-sync/config.toml
+& ./tools/inventree-sync/.venv/Scripts/inventree-sync.exe validate --config ./tools/inventree-sync/config.toml
+& ./tools/inventree-sync/.venv/Scripts/inventree-sync.exe sync --config ./tools/inventree-sync/config.toml
 ```
 
-Альтернатива без токена в історії команд: приховано прочитати його через Python `getpass` і передати дочірньому процесу в env (для стандартного `token_env`):
+У локальному TOML вказати server URL без `/api/` і scope path. Для старого config додати `[sync]`/`[libraries]` за прикладом, не перезаписуючи локальні settings. Токен надходить зі змінної `INVENTREE_API_TOKEN` або іншої, заданої `token_env`. Його можна безпечно ввести через Python `getpass` і передати дочірньому процесу в env; не вставляти token literal в command history, TOML або Git. Програма сама не читає `.env`: якщо він використовується, завантаження env виконує середовище запуску. `python -m inventree_sync <command> --config ...` еквівалентний console command.
 
-```powershell
-& ./tools/inventree-sync/.venv/Scripts/python.exe -c "import getpass, os, subprocess, sys; os.environ['INVENTREE_API_TOKEN'] = getpass.getpass('InvenTree token: '); sys.exit(subprocess.call([sys.executable, '-m', 'inventree_sync', 'inspect', '--config', 'tools/inventree-sync/config.toml']))"
-```
+- `inspect`: тільки попереднє scoped retrieval та структурна перевірка, summary root/category/Parts/parameter/template counts. Не виконує Altium-перетворення або SQLite generation.
+- `validate`: завантаження повної конфігурації, незмінний retrieval API, `prepare_tables`, library-file existence/model-ref checks та реальна in-memory SQLite schema/insertion/verification. Summary містить root, table/component/library counts, SQLite/reference status. Немає filesystem output, lock або published database changes. Binary models не перевіряються.
+- `sync`: ті самі source/transformation checks, повна SQLite validation, staging, reopen verification і atomic publish. Summary містить destination, table/component counts, integrity/publication status.
 
-Команда виконує лише GET. Вона не створює файлів ACCDB і не змінює `.DbLib` чи дані InvenTree.
+Коди завершення: `0` успіх; `1` неочікувана внутрішня помилка; `2` configuration/data validation; `3` API/authentication; `4` database/filesystem/locking/publication. Відсутній API token, як і раніше, є configuration error (`2`). `DatabaseError` відокремлений від `ExportValidationError`. Secrets, Authorization headers і raw payloads не виводяться; unexpected exceptions мають безпечне generic повідомлення.
+
+### 8.1. Перегляд і підключення до Altium
+
+Після успішного sync відкрити `components.sqlite` у DB Browser for SQLite або SQLiteStudio. Перевірити список компонентних таблиць, структуру TEXT полів та Browse Data; для стабільного читання використовувати `SELECT ... ORDER BY "IPN"`. Не зберігати ручні виправлення як джерело даних: наступний snapshot їх замінить. Закрити viewer перед публікацією на Windows, якщо він утримує файл.
+
+У Altium повторно використати SQLite ODBC driver/DSN або connection string, з яким користувач уже перевірив sample DbLib; шлях бази змінити на абсолютний шлях `sync.output`. Драйвер має відповідати розрядності Altium. У Database Library вибрати це connection, увімкнути поточні непорожні таблиці й призначити `IPN` ключем. Налаштувати наведений у розділі 6 mapping `Library Ref`, `Library Path`, `Footprint Ref`, `Footprint Path`; квадратні дужки у mapping позначають спеціальні цілі Altium, не SQL quoting і не частину database column names.
+
+`Value` залишити звичайним database parameter; Comment string символу `=Value` налаштовується вручну у Altium, якщо ще не заданий. Не створювати synthetic database `Comment`. Явний InvenTree `Comment` залишається звичайним параметром. Перевірити пошук IPN, placement символу, Comment і передачу footprint на PCB. Після перейменування категорії оновити table mapping DbLib вручну. Скрипт не створює і не редагує DbLib, libraries або binary models.
 
 ## 9. Послідовність і контроль якості
 
 ```text
-config + secrets
-  → токен → повне доступне дерево категорій → визначення root PK
+config + runtime token
+  → повне дерево категорій → root PK
   → Parts?category=<root_pk>&cascade=true&parameters=true (всі сторінки)
-  → нормалізація вкладених parameters/template_detail → спільні індекси
-  → перевірка scope, leaf/non-leaf розміщення та унікальності IPN
-  → ігнорування leaf-категорій без експортованих Parts
-  → групування Parts за leaf-категоріями
-  → PreparedDataset (межа Milestone 1B; inspect виводить summary)
-  → union фактичних параметрів усіх Parts кожної категорії → виключення чотирьох CAD-колонок
-  → перетворення source-only Altium refs і форматування звичайних параметрів з units
-  → перевірка всього набору
-  → PreparedTables (межа Milestone 1C; таблиці лише в пам'яті)
-  → наступний етап: вибір backend і writer
-  → у разі вибору Access, попередній план:
-  → тимчасовий ACCDB → DDL + INSERT → commit → повторне читання
-  → закриття з'єднань → заміна цільового ACCDB
-  → JSON-звіт і маніфест
+  → PreparedDataset [1B, inspect]
+  → union фактичних параметрів → CAD exclusions
+  → Altium technical fields + unit-aware ordinary values
+  → PreparedTables [1C]
+  → SQLite schema/data validation у пам'яті [validate]
+  → exclusive destination lock → unique staging у destination directory
+  → DELETE journal + transaction → commit → close
+  → read-only reopen → integrity/schema/constraints/complete data verification
+  → close → os.replace → cleanup [1D, sync]
+  → components.sqlite → SQLite ODBC → Altium DbLib
 ```
 
-Помилки блокують публікацію всього файлу: пропущений/дубльований IPN (також колізія без урахування регістру для провайдера БД), дубль параметра, неправильне посилання, відсутня бібліотека, цикл/відсутній предок у дереві, невідповідна категорія, неповна пагінація чи збій HTTP. Стиль IPN перевіряється без автоматичного перейменування: історичні IPN та оригінальні ordering codes не переписуються за новими правилами.
+Unit-тести не використовують live server, credentials, Altium або ODBC. Вони перевіряють 1A/1B pagination/auth/API contracts, 1C union/CAD/model/unit rules, 1D exact TEXT/NULL/Unicode round-trip, quoted/reserved/long identifiers, global IPN collisions, malformed direct inputs, actual SQLite constraints, повні snapshots, corruption та creation/insertion/commit/verification/replacement failures, exclusive locks, cleanup ownership і CLI exit codes. End-to-end CLI тести підміняють лише HTTP transport і створюють справжню тимчасову SQLite базу. `validate` перевіряється на відсутність filesystem changes, включно з наявним destination.
 
-JSON-звіт: час початку/кінця, версія програми та сервера/API, category PK/full path/table name, кількість отриманих і експортованих Parts, виключення, колонки та їх джерела в InvenTree, попередження/помилки із Part PK/IPN, hash результату. Жодних секретів. Багатозапитний REST-експорт не гарантує транзакційний snapshot: для узгодженого виробничого випуску потрібне вікно без редагувань або серверний snapshot. Часи збору фіксуються у звіті.
+Ціль InvenTree лишається 1.5.6 / API schema 530; retrieval strategy, request count і нормалізація не змінюються. Багатосторінковий REST не гарантує транзакційний source snapshot: для узгодженого production release потрібне вікно без редагувань або server snapshot. Unit-тести не доводять наявність моделей усередині binary libraries або production ODBC/Altium compatibility. Detailed JSON manifest, audit history, binary library indexing та автоматизація DbLib mapping залишаються поза Milestone 1D.
 
-Коди завершення: `0` успіх, `1` неочікувана помилка, `2` конфігурація/дані, `3` API/авторизація, `4` файловий запис/блокування.
+## 10. Історичне рішення — superseded
 
-Тести реалізації:
-
-1. Пагінація, 401/403, retry 429, непідтримувана схема, зовнішній/циклічний next.
-2. Inductors як листок, порожня leaf-категорія не створює таблицю, точна рівність category.name/table.name для експортованих категорій, назви до 64 символів, відхилення пунктуації й зарезервованих слів, дублікати назв у різних гілках, новий дочірній вузол і Part у колишньому листку.
-3. Union фактичних параметрів усіх Parts категорії, параметр лише у другому Part, відсутній параметр → NULL, новий фактичний Part parameter без змін репозиторію, дубль одного template на Part і конфлікт назв templates.
-4. Обидва формати бібліотеки з/без розширення, неправильний delimiter, Package не підміняє Footprint, різні IPN зі спільним символом.
-   Уточнення 1C: чотири CAD-параметри відсутні в схемі/рядках, але залишаються у джерелі; required refs працюють незалежно від схеми, KiCad values і CAD units не впливають на результат. Missing units додаються, явні еквівалентні одиниці не дублюються, конфлікт/неоднозначність має контекст; вихідний dataset незмінний, повторні перетворення еквівалентні.
-5. Повторне читання ACCDB: `0603`, `%`, Unicode одиниць, апострофи і `=...` залишаються текстом; довгі значення не обрізаються; відсутнє значення є NULL; дубль IPN відхиляється; помилка або lock не змінює попередню базу.
-6. Інтеграційна перевірка на Windows із конкретним InvenTree та Altium: ACE відповідної розрядності, видимість таблиць і Short/Long Text полів, пошук за IPN, розміщення символу та передача footprint на PCB. Перевірити два послідовні sync, видалення/переміщення Part, перейменування категорії і блокування файлу Altium.
-
-Для Milestone 1B задано цільову версію InvenTree 1.5.6 / API schema 530; Milestone 1C не змінює цей контракт. Живий сервер, права доступу й повнота видимого дерева не перевірялися. Unit-тести використовують локальні fixtures, mocks, тимчасові директорії й тестові файли бібліотек; це не перевірка бінарних моделей або сумісності з Altium. Технічний шаблон `database/templates/empty.accdb` зберігається в репозиторії; його перевірка з конкретним ACE/Altium середовищем та реалізація writer залишаються окремими завданнями.
+До Milestone 1C розглядався Microsoft Access із шаблоном порожньої бази; 1C повторно відкрив вибір Access/SQLite. Milestone 1D остаточно обрав SQLite після підтвердженого користувачем ODBC sample test. Попередній Access writer не був реалізований; його інструкції не є чинним планом. Історичні repository artifacts не видаляються як частина цього milestone, але вони не потрібні SQLite pipeline. Active architecture не має альтернативного backend або Access-specific setup.

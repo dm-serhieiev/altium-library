@@ -70,6 +70,16 @@ htmlcov/
 config.toml
 config.local.toml
 
+# Generated SQLite snapshots in the repository output directory
+/database/*.sqlite
+/database/*.sqlite-journal
+/database/*.sqlite-wal
+/database/*.sqlite-shm
+# Unique staging files and destination locks owned by inventree-sync
+*.staging.sqlite
+*.staging.sqlite-journal
+*.sync.lock
+
 # Tokens / secrets
 *.token
 *.secret

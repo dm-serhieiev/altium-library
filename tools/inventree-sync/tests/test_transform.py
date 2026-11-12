@@ -3,8 +3,8 @@ from pathlib import Path
 
 import pytest
 
-from inventree_sync.models import ModelRef, Part
-from inventree_sync.transform import LibraryLayout, parse_model_ref, prepare_tables, resolve_model_path
+from inventree_sync.models import ModelRef, Parameter, ParameterTemplate, Part
+from inventree_sync.transform import LibraryLayout, format_parameter_value, parse_model_ref, prepare_tables, resolve_model_path
 from inventree_sync.validate import ExportValidationError, ModelReferenceError
 
 
@@ -63,12 +63,12 @@ def test_complete_rows_and_source_values(export_dataset, library_layout):
         "IPN": "RES-10K-1%-0603",
         "Library Ref": "Resistor", "Library Path": r"..\symbols\Passives.SchLib",
         "Footprint Ref": "RES_0603_H0.55", "Footprint Path": r"..\footprints\Resistors.PcbLib",
-        "Altium Symbol": "Passives:Resistor", "Altium Footprint": "Resistors:RES_0603_H0.55",
         "Value": "10 kΩ", "Package": "0603", "Power Rating": None,
     }
-    assert second["Package"] is None and second["Power Rating"] == "0.125"
-    assert second["Altium Symbol"] == "Passives.SchLib:Resistor"
-    assert second["Altium Footprint"] == "Resistors.PcbLib:RES_0603_H0.55"
+    assert second["Package"] is None and second["Power Rating"] == "0.125 W"
+    assert second["Library Ref"] == "Resistor"
+    assert second["Footprint Ref"] == "RES_0603_H0.55"
+    assert not {"KiCad Symbol", "KiCad Footprint", "Altium Symbol", "Altium Footprint"} & set(first)
     assert tuple(first) == tuple(c.name for c in table.columns)
 
 
@@ -77,6 +77,107 @@ def test_source_text_preserved(export_dataset, library_layout, value):
     parameters = {**export_dataset.parameters[20], 30: replace(export_dataset.parameters[20][30], data=value)}
     dataset = replace(export_dataset, parameters={**export_dataset.parameters, 20: parameters})
     assert prepare_tables(dataset, library_layout).tables[0].rows[0]["Value"] == (None if value == "" else value)
+
+
+@pytest.mark.parametrize("data,units,expected", [
+    ("10k", "ohm", "10k ohm"),
+    ("4.7u", "F", "4.7u F"), ("100n", "F", "100n F"),
+    ("0.125", "W", "0.125 W"), ("3.3", "V", "3.3 V"),
+    ("10k ohm", "ohm", "10k ohm"), ("10kΩ", "ohm", "10kΩ"),
+    ("10 kΩ", "ohm", "10 kΩ"), ("10 kΩ", "ohm", "10 kΩ"),
+    ("10 kohm", "Ω", "10 kohm"), ("100nF", "F", "100nF"),
+    ("0.125 W", "W", "0.125 W"), ("1%", "%", "1%"),
+    ("0603", "", "0603"), ("SMD", None, "SMD"),
+    (None, "ohm", None), ("", "ohm", None),
+    (" \t ", "ohm", " \t "), (" \t ", "", " \t "),
+    ("01.2500", "V", "01.2500 V"), ("1,25", "V", "1,25 V"),
+    ("1E3", "ohm", "1E3 ohm"), ("-1.20e-3", "A", "-1.20e-3 A"),
+    ("+.25", "W", "+.25 W"), ("4.7µ", "F", "4.7µ F"),
+    ("4.7μF", "F", "4.7μF"), ("10M", "ohm", "10M ohm"),
+    ("10mV", "V", "10mV"), ("10 V", "mV", "10 V"),
+    ("10 mm", "m", "10 mm"), ("10 m", "m", "10 m"),
+    ("25 °C", "°C", "25 °C"), ("1 kHz", "Hz", "1 kHz"),
+    ("10", "rpm", "10 rpm"), ("10 rpm", "rpm", "10 rpm"),
+    ("10krpm", "rpm", "10krpm"), ("10", "m/s", "10 m/s"),
+    ("10 m/s", "m/s", "10 m/s"), (" 10 kΩ  ", "ohm", " 10 kΩ  "),
+])
+def test_unit_formatting(data, units, expected):
+    assert format_parameter_value(data, units) == expected
+
+
+@pytest.mark.parametrize("data,units,reason", [
+    ("10 V", "ohm", "conflicting"), ("100nF", "ohm", "conflicting"),
+    ("1%", "W", "conflicting"), ("0.125 W", "F", "conflicting"),
+    ("10m", "V", "ambiguous"), ("10 unknown", "V", "ambiguous"),
+    ("100nf", "F", "ambiguous"), ("text W", "W", "ambiguous"),
+    ("1-2 V", "V", "ambiguous"), ("10k ohm ohm", "ohm", "ambiguous"),
+    ("10", " ", "configured units"), ("10", " V", "configured units"),
+])
+def test_conflicting_or_ambiguous_units_are_not_repaired(data, units, reason):
+    with pytest.raises(ExportValidationError, match=reason):
+        format_parameter_value(data, units)
+
+
+@pytest.mark.parametrize("data,units,expected", [
+    ("10k", "ohm", "10k ohm"), ("10kΩ", "ohm", "10kΩ"),
+    ("1,2500", "W", "1,2500 W"), ("100n", "F", "100n F"),
+    (None, "V", None), ("", "V", None), (" \t ", "V", " \t "),
+])
+def test_row_units_preserve_source_and_repeatability(export_dataset, library_layout, data, units, expected):
+    parameters = {**export_dataset.parameters[20], 30: replace(export_dataset.parameters[20][30], data=data)}
+    templates = {**export_dataset.templates, 30: replace(export_dataset.templates[30], units=units)}
+    # Both rows use this template; the second remains a valid unitless scalar.
+    other = {**export_dataset.parameters[21], 30: replace(export_dataset.parameters[21][30], data="1")}
+    dataset = replace(export_dataset, templates=templates, parameters={20: parameters, 21: other})
+    before = repr(dataset)
+    result = prepare_tables(dataset, library_layout)
+    assert result.tables[0].rows[0]["Value"] == expected
+    assert repr(dataset) == before
+    assert dataset.parameters[20][30].data == data
+    assert prepare_tables(dataset, library_layout) == result
+
+
+def test_formatting_failure_is_contextual_and_returns_no_partial_tables(export_dataset, library_layout):
+    parameters = {**export_dataset.parameters[21], 35: replace(export_dataset.parameters[21][35], data="10 V")}
+    dataset = replace(export_dataset, parameters={**export_dataset.parameters, 21: parameters})
+    before = repr(dataset)
+    result = None
+    with pytest.raises(ExportValidationError) as error:
+        result = prepare_tables(dataset, library_layout)
+    assert all(text in str(error.value) for text in (
+        "Part pk=21", "IPN='RES-1K-1%-0603'", "template pk=35",
+        "name='Power Rating'", "value='10 V'", "units='W'", "conflicting",
+    ))
+    assert result is None and repr(dataset) == before
+    assert not library_layout.dblib_path.exists()
+
+
+@pytest.mark.parametrize("data", [None, "", "not:a:valid:altium:reference", "100nF"])
+def test_kicad_values_and_cad_units_do_not_affect_export(export_dataset, library_layout, data):
+    expected = prepare_tables(export_dataset, library_layout)
+    parameters = {**export_dataset.parameters[20], **{
+        pk: replace(export_dataset.parameters[20][pk], data=data) for pk in (12, 13)
+    }}
+    templates = {**export_dataset.templates, **{
+        pk: replace(export_dataset.templates[pk], units="ohm") for pk in (10, 11, 12, 13)
+    }}
+    dataset = replace(export_dataset, templates=templates, parameters={**export_dataset.parameters, 20: parameters})
+    assert prepare_tables(dataset, library_layout) == expected
+
+
+def test_ambiguous_altium_assignments_fail_instead_of_overwriting(export_dataset, library_layout):
+    templates = {**export_dataset.templates, 80: ParameterTemplate(80, "Altium Symbol", "")}
+    parameters = {**export_dataset.parameters[20], 80: Parameter(180, 20, 80, "Passives:Resistor")}
+    with pytest.raises(ExportValidationError, match="Part pk=20.*ambiguous.*Altium Symbol.*10, 80"):
+        prepare_tables(replace(export_dataset, templates=templates, parameters={**export_dataset.parameters, 20: parameters}), library_layout)
+
+
+def test_model_lookup_uses_each_parts_template_reference(export_dataset, library_layout):
+    templates = {**export_dataset.templates, 80: ParameterTemplate(80, "Altium Symbol", "")}
+    parameters = {pk: p for pk, p in export_dataset.parameters[21].items() if pk != 10}
+    parameters[80] = replace(export_dataset.parameters[21][10], template_pk=80)
+    dataset = replace(export_dataset, templates=templates, parameters={**export_dataset.parameters, 21: parameters})
+    assert prepare_tables(dataset, library_layout) == prepare_tables(export_dataset, library_layout)
 
 
 @pytest.mark.parametrize("template_pk", [10, 11])

@@ -6,6 +6,11 @@ from .retrieval import PreparedDataset
 from .validate import SchemaError, validate_columns, validate_parameter_references
 
 
+EXCLUDED_EXPORT_PARAMETERS = frozenset({
+    "KiCad Symbol", "KiCad Footprint", "Altium Symbol", "Altium Footprint",
+})
+
+
 def build_table_schemas(dataset: PreparedDataset) -> tuple[TableSchema, ...]:
     """Build schemas in category PK order using the already validated 1B groups.
 
@@ -41,6 +46,7 @@ def build_table_schemas(dataset: PreparedDataset) -> tuple[TableSchema, ...]:
             ))
         columns = TECHNICAL_COLUMNS + tuple(
             ColumnDefinition(dataset.templates[pk].name, pk) for pk in sorted(template_pks)
+            if dataset.templates[pk].name not in EXCLUDED_EXPORT_PARAMETERS
         )
         validate_columns(columns, context)
         schemas.append(TableSchema(category_pk, category.name, dataset.tree.full_path(category_pk), columns))

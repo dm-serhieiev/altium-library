@@ -178,7 +178,9 @@ Do not use category parameter assignments or a locally maintained category schem
 
 An empty leaf category produces no Access table and does not require schema discovery.
 
-If a parameter exists on at least one Part in the category, it belongs to the table schema. Parts which do not contain that parameter receive SQL `NULL` for that column.
+If an ordinary parameter exists on at least one Part in the category, it belongs to the table schema. Parts which do not contain that parameter receive Python `None` (eventually SQL `NULL`) for that column. Dynamic columns remain ordered by ParameterTemplate PK after the five technical columns.
+
+Validate all actual parameter references before excluding these exact template names from the output schema: `KiCad Symbol`, `KiCad Footprint`, `Altium Symbol`, `Altium Footprint`. KiCad values are ignored by Altium transformation. The two Altium parameters are mandatory source-only parameters; resolve them through `PreparedDataset.parameters` and `PreparedDataset.templates`, independently of exported columns. Keep all source parameters and templates in `PreparedDataset`.
 
 Do not hard-code the expected schema of categories such as Resistors, Capacitors, Inductors, or Transformers in Python or TOML merely to reproduce the current InvenTree state.
 
@@ -221,6 +223,8 @@ Altium Footprint
 ```
 
 have special meaning to `inventree-sync`.
+
+They generate only `Library Ref`, `Library Path`, `Footprint Ref`, and `Footprint Path`; their original values must not become output columns. Exclusion does not relax required-assignment, reference-format, library-file existence or global model-name uniqueness checks.
 
 Follow the exact format and parsing rules defined in:
 
@@ -285,6 +289,8 @@ Preserve values such as:
 without unintended numeric conversion or formatting changes.
 
 Use the textual InvenTree parameter representation defined by the architecture.
+
+`PreparedDataset` retains the original source representation. In the transformation layer only, `PreparedTables` formats ordinary parameter values using `Parameter.data` and `ParameterTemplate.units`, never `data_numeric`. Append missing units using the exact metadata spelling and one added space; preserve existing equivalent suffixes (especially `ohm`/`Ω`/`Ω`) without duplication or conversion. Do not format the five technical columns or excluded CAD parameters. Conflicting or ambiguous unit suffixes must raise contextual `ExportValidationError` with Part PK/IPN, template PK/name, original value and configured units; never return partial tables. Supported scalar/suffix recognition and its limits are specified in the architecture document. Missing/empty values remain `None`; whitespace-only optional values remain verbatim even with units.
 
 Missing optional values should remain missing and ultimately map to SQL `NULL`, not placeholder strings such as:
 

@@ -15,9 +15,25 @@ def test_union_includes_second_part_only_parameters(export_dataset):
     assert (schema.category_pk, schema.name, schema.category_path) == (2, "Resistors", "Components / Resistors")
     assert schema.columns[:5] == TECHNICAL_COLUMNS
     assert [(c.template_pk, c.name) for c in schema.columns[5:]] == [
-        (10, "Altium Symbol"), (11, "Altium Footprint"), (30, "Value"),
-        (31, "Package"), (35, "Power Rating"),
+        (30, "Value"), (31, "Package"), (35, "Power Rating"),
     ]
+
+
+def test_cad_exclusion_preserves_source_and_uses_exact_names(export_dataset):
+    before = repr(export_dataset)
+    schema = build_table_schemas(export_dataset)[0]
+    assert not {"KiCad Symbol", "KiCad Footprint", "Altium Symbol", "Altium Footprint"} & {c.name for c in schema.columns}
+    assert all(pk in export_dataset.parameters[20] for pk in (10, 11, 12, 13))
+    assert repr(export_dataset) == before
+    templates = {**export_dataset.templates, 30: ParameterTemplate(30, "KiCad Symbol Notes")}
+    assert "KiCad Symbol Notes" in {c.name for c in build_table_schemas(replace(export_dataset, templates=templates))[0].columns}
+
+
+@pytest.mark.parametrize("template_pk", [10, 11, 12, 13])
+def test_excluded_parameters_still_validate_references(export_dataset, template_pk):
+    parameters = {**export_dataset.parameters[20], template_pk: replace(export_dataset.parameters[20][template_pk], part_pk=999)}
+    with pytest.raises(SchemaError, match="belongs to Part pk=999"):
+        build_table_schemas(replace(export_dataset, parameters={**export_dataset.parameters, 20: parameters}))
 
 
 def test_order_does_not_depend_on_parts_or_mapping_order(export_dataset):

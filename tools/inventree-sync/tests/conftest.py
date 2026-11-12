@@ -43,13 +43,17 @@ def export_dataset():
     ])
     parts = {20: Part(20, "RES-10K-1%-0603", 2), 21: Part(21, "RES-1K-1%-0603", 2)}
     templates = {pk: ParameterTemplate(pk, name, "") for pk, name in (
-        (10, "Altium Symbol"), (11, "Altium Footprint"), (30, "Value"),
+        (10, "Altium Symbol"), (11, "Altium Footprint"),
+        (12, "KiCad Symbol"), (13, "KiCad Footprint"), (30, "Value"),
         (31, "Package"), (35, "Power Rating"), (99, "Unused Template"),
     )}
+    templates[35] = ParameterTemplate(35, "Power Rating", "W")
     parameters = {
         20: {
             10: Parameter(100, 20, 10, "Passives:Resistor"),
             11: Parameter(101, 20, 11, "Resistors:RES_0603_H0.55"),
+            12: Parameter(108, 20, 12, "Device:R"),
+            13: Parameter(109, 20, 13, "Resistor_SMD:R_0603_1608Metric"),
             30: Parameter(102, 20, 30, "10 kΩ"),
             31: Parameter(103, 20, 31, "0603"),
         },

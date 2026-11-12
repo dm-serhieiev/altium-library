@@ -7,10 +7,62 @@ import re
 from types import MappingProxyType
 from typing import Mapping
 
-from .models import ModelKind, ModelRef, Parameter, Part, PreparedTable, PreparedTables, TableSchema
+from .models import ModelKind, ModelRef, Parameter, ParameterTemplate, Part, PreparedTable, PreparedTables, TableSchema
 from .retrieval import PreparedDataset
 from .schema import build_table_schemas
 from .validate import ExportValidationError, ModelReferenceError, validate_model_uniqueness, validate_row
+
+
+# Suffix recognition only: these are not category schemas or conversion factors.
+_SI_PREFIXES = frozenset("q r y z a f p n u µ μ m c d h k M G T P E Z Y R Q".split()) | {"da"}
+_UNIT_BASES = {unit: unit for unit in ("V", "A", "F", "H", "W", "Hz", "s", "m", "g", "K", "°C", "%")}
+_UNIT_BASES.update({"ohm": "ohm", "Ω": "ohm", "Ω": "ohm"})
+_MAGNITUDE = re.compile(r"\s*[+-]?(?:[0-9]+(?:[.,][0-9]*)?|[.,][0-9]+)(?:[eE][+-]?[0-9]+)?")
+
+
+def _unit_base(suffix: str) -> str | None:
+    if suffix in _UNIT_BASES:
+        return _UNIT_BASES[suffix]
+    for prefix in _SI_PREFIXES:
+        remainder = suffix[len(prefix):].lstrip()
+        if suffix.startswith(prefix) and remainder in _UNIT_BASES:
+            return _UNIT_BASES[remainder]
+    return None
+
+
+def format_parameter_value(data: str | None, units: str | None) -> str | None:
+    """Append metadata units to scalar text without numeric conversion.
+
+    Recognize signed decimal/scientific magnitudes, optional SI prefixes and
+    a small set of case-sensitive unit suffixes (including ohm/Ω/Ω aliases).
+    Exact custom units also work. Unknown suffixes and non-scalar expressions
+    with units are ambiguous and fail; this is not a general unit parser.
+    Whitespace-only optional values retain the existing verbatim policy.
+    """
+    if data is None or data == "":
+        return None
+    if not units or not data.strip():
+        return data
+    if not isinstance(units, str) or not units.strip() or units != units.strip():
+        raise ExportValidationError("configured units must be nonempty text without surrounding whitespace")
+    magnitude = _MAGNITUDE.match(data)
+    if magnitude is None:
+        raise ExportValidationError("ambiguous value: expected a scalar magnitude with an optional unit suffix")
+    suffix = data[magnitude.end():].strip()
+    expected = _unit_base(units)
+    actual = _unit_base(suffix)
+    if suffix == units or (expected is not None and actual == expected):
+        return data
+    if suffix == "m":
+        raise ExportValidationError("ambiguous suffix 'm': milli prefix or metre unit")
+    if not suffix or suffix in _SI_PREFIXES:
+        return f"{data} {units}"
+    # Permit an SI prefix before an exact custom metadata unit, e.g. krpm.
+    if any(suffix.startswith(prefix) and suffix[len(prefix):].lstrip() == units for prefix in _SI_PREFIXES):
+        return data
+    if actual is not None:
+        raise ExportValidationError(f"conflicting physical unit suffix {suffix!r}")
+    raise ExportValidationError(f"ambiguous or unsupported unit suffix {suffix!r}")
 
 
 @dataclass(frozen=True, slots=True)
@@ -80,16 +132,21 @@ def resolve_model_path(ref: ModelRef, layout: LibraryLayout) -> str:
 
 
 def _required_ref(
-    name: str, kind: ModelKind, columns_by_name: Mapping[str, int],
+    name: str, kind: ModelKind, templates: Mapping[int, ParameterTemplate],
     parameters: Mapping[int, Parameter], context: str,
 ) -> ModelRef:
-    template_pk = columns_by_name.get(name)
-    if template_pk is None:
-        raise ExportValidationError(f"{context}: missing required ParameterTemplate {name!r}")
-    parameter = parameters.get(template_pk)
+    template_pks = [pk for pk in parameters if templates[pk].name == name]
+    if not template_pks:
+        available = sorted(pk for pk, template in templates.items() if template.name == name)
+        if not available:
+            raise ExportValidationError(f"{context}: missing required ParameterTemplate {name!r}")
+        raise ExportValidationError(f"{context}, template pks={available} name={name!r}: missing parameter assignment")
+    if len(template_pks) != 1:
+        raise ExportValidationError(f"{context}: ambiguous required ParameterTemplate name={name!r}, template pks={sorted(template_pks)}")
+    template_pk = template_pks[0]
+    parameter = parameters[template_pk]
     source = f"{context}, template pk={template_pk} name={name!r}"
-    if parameter is None:
-        raise ExportValidationError(f"{source}: missing parameter assignment")
+    source += f", value={parameter.data!r} units={templates[template_pk].units!r}"
     if parameter.data is None or not parameter.data.strip():
         raise ExportValidationError(f"{source}, parameter pk={parameter.pk}: required model reference is empty")
     try:
@@ -100,6 +157,7 @@ def _required_ref(
 
 def _build_row(
     part: Part, parameters: Mapping[int, Parameter], schema: TableSchema,
+    templates: Mapping[int, ParameterTemplate], context: str,
     symbol: ModelRef, footprint: ModelRef, symbol_path: str, footprint_path: str,
 ) -> Mapping[str, str | None]:
     row: dict[str, str | None] = {
@@ -112,8 +170,15 @@ def _build_row(
     for column in schema.columns:
         if column.template_pk is not None:
             parameter = parameters.get(column.template_pk)
+            template = templates[column.template_pk]
             value = parameter.data if parameter is not None else None
-            row[column.name] = None if value == "" else value
+            try:
+                row[column.name] = format_parameter_value(value, template.units)
+            except ExportValidationError as exc:
+                raise ExportValidationError(
+                    f"{context}, template pk={template.pk} name={template.name!r}, "
+                    f"value={value!r} units={template.units!r}: {exc}"
+                ) from None
     return MappingProxyType(row)
 
 
@@ -128,13 +193,12 @@ def prepare_tables(dataset: PreparedDataset, layout: LibraryLayout) -> PreparedT
     seen_models: dict[tuple[ModelKind, str], tuple[ModelRef, str]] = {}
     library_paths: dict[tuple[ModelKind, str], str] = {}
     for schema in schemas:
-        columns_by_name = {c.name: c.template_pk for c in schema.columns if c.template_pk is not None}
         rows: list[Mapping[str, str | None]] = []
         for part in sorted(dataset.groups[schema.category_pk], key=lambda item: item.pk):
             context = f"Part pk={part.pk} IPN={part.ipn!r}, category pk={schema.category_pk} path={schema.category_path!r}"
             parameters = dataset.parameters[part.pk]
-            symbol = _required_ref("Altium Symbol", "symbol", columns_by_name, parameters, context)
-            footprint = _required_ref("Altium Footprint", "footprint", columns_by_name, parameters, context)
+            symbol = _required_ref("Altium Symbol", "symbol", dataset.templates, parameters, context)
+            footprint = _required_ref("Altium Footprint", "footprint", dataset.templates, parameters, context)
             for ref in (symbol, footprint):
                 validate_model_uniqueness(ref, context, seen_models)
                 key = (ref.kind, ref.library_filename)
@@ -143,7 +207,7 @@ def prepare_tables(dataset: PreparedDataset, layout: LibraryLayout) -> PreparedT
                         library_paths[key] = resolve_model_path(ref, layout)
                     except ExportValidationError as exc:
                         raise ExportValidationError(f"{context}, {ref.kind} reference {ref!r}: {exc}") from None
-            row = _build_row(part, parameters, schema, symbol, footprint,
+            row = _build_row(part, parameters, schema, dataset.templates, context, symbol, footprint,
                              library_paths[(symbol.kind, symbol.library_filename)],
                              library_paths[(footprint.kind, footprint.library_filename)])
             validate_row(row, schema.columns, context)

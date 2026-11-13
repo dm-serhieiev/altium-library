@@ -107,7 +107,7 @@ publishes a verified SQLite snapshot using `sqlite.py`.
 
 Do not implement API operations which create, update, move, rename, or delete InvenTree objects unless a future task explicitly changes this architectural rule.
 
-The generated SQLite `.sqlite` database is a reproducible intermediate artifact.
+The generated SQLite `.sqlite` or `.sqlite3` database is a reproducible intermediate artifact.
 
 It is not a source of truth.
 
@@ -372,9 +372,15 @@ Build a complete snapshot from `PreparedTables`, never incrementally modify the 
 
 Create a unique staging file in the destination directory, use a transaction with DELETE rollback journaling and normal synchronization, commit and close it, reopen read-only and verify integrity, exact tables/schema/constraints and every stored value. Close verification before `os.replace`. Never publish an incomplete database. Do not add auxiliary user tables or columns.
 
+While holding the destination lock, immediately before `os.replace`, check `<destination>-wal`, `-shm`, and `-journal` without opening the published database. Use a fail-closed check that detects all filesystem entries, including empty files and dangling symlinks, and aborts if inspection fails. Any sidecar blocks publication with `DatabaseError` / CLI code `4`; preserve the destination and external sidecars, and clean up only this operation's staging/lock artifacts. Never checkpoint, repair or automatically remove external SQLite journals.
+
 Acquire an exclusive `<destination>.sync.lock` before staging/publication. Never remove a lock belonging to another active or potentially interrupted process. Recover stale locks manually only after confirming the owning process is stopped, as described in the architecture. Clean up only staging artifacts and locks owned by this operation.
 
+This lock coordinates only `inventree-sync` processes. Sidecar checks cannot detect every external reader or prevent races with non-cooperating applications; do not claim `os.replace` guarantees safe replacement of an actively used database. Close Altium and other SQLite consumers before synchronization. On a blocked publication, let the owning application complete normal transactions/recovery and journal cleanup before retrying; do not recommend deleting journals to bypass the check. Continue reporting Windows replacement-lock failures.
+
 All configured filesystem paths are relative to the TOML directory. `[sync]` output/dblib and `[libraries]` symbols/footprints are required for validate/sync; inspect still supports only `[inventree]` and `[scope]`. No database file or output directory is created by validate.
+
+For validate/sync, `sync.output` must use `.sqlite` or `.sqlite3`, case-insensitively. Reject other extensions with `ConfigError` / CLI code `2` before retrieval or file writes. Preserve the checks preventing output from overwriting the configuration or DbLib file.
 
 Do not force-close Altium or another process holding the database, and do not remove their lock/journal files.
 
@@ -538,6 +544,7 @@ Examples of files which are normally generated or local include:
 
 ```text
 database/components.sqlite
+database/components.sqlite3
 *.staging.sqlite
 *.staging.sqlite-journal
 *.sync.lock

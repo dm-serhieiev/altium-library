@@ -1,5 +1,7 @@
 from contextlib import closing
 from dataclasses import replace
+from pathlib import Path
+import stat
 import sqlite3
 from unittest.mock import Mock
 
@@ -353,3 +355,109 @@ def test_staging_creation_failure_releases_own_lock(prepared, tmp_path, monkeypa
         writer.write_sqlite_database(prepared, destination)
     assert destination.read_bytes() == before
     assert [p.name for p in destination.parent.iterdir()] == [destination.name]
+
+
+def test_active_wal_blocks_replacement_until_external_connection_closes(prepared, tmp_path):
+    destination = tmp_path / "output" / "components.sqlite"
+    writer.write_sqlite_database(prepared, destination)
+    updated = one_table(prepared, name="Updated Resistors")
+    sidecars = [Path(str(destination) + suffix) for suffix in ("-wal", "-shm")]
+    with closing(sqlite3.connect(destination)) as external:
+        assert external.execute("PRAGMA journal_mode=WAL").fetchone() == ("wal",)
+        external.execute('UPDATE "Resistors" SET "Value" = ?', ("external WAL value",))
+        external.commit()
+        before = {path: path.read_bytes() for path in (destination, *sidecars)}
+        with pytest.raises(writer.DatabaseError, match="publication blocked.*components.sqlite-wal"):
+            writer.write_sqlite_database(updated, destination)
+        assert {path: path.read_bytes() for path in before} == before
+        assert set(destination.parent.iterdir()) == set(before)
+        assert external.execute('SELECT DISTINCT "Value" FROM "Resistors"').fetchall() == [("external WAL value",)]
+    # SQLite performs normal WAL cleanup when its last external connection closes.
+    assert all(not path.exists() for path in sidecars)
+    writer.write_sqlite_database(updated, destination)
+    writer._verify_database(updated, destination.resolve())
+    assert [p.name for p in destination.parent.iterdir()] == [destination.name]
+
+
+@pytest.mark.parametrize("suffix", ["-wal", "-shm", "-journal"])
+@pytest.mark.parametrize("content", [b"", b"another application's journal"])
+@pytest.mark.parametrize("existing", [False, True])
+def test_sidecar_conflicts_preserve_all_external_files(prepared, tmp_path, monkeypatch, suffix, content, existing):
+    destination = tmp_path / "output" / "components.sqlite"
+    if existing:
+        writer.write_sqlite_database(prepared, destination)
+    else:
+        destination.parent.mkdir()
+    sidecar = Path(str(destination) + suffix)
+    sidecar.write_bytes(content)
+    unrelated = destination.parent / ".other-operation.staging.sqlite"
+    unrelated.write_bytes(b"belongs to another process")
+    before = {path: path.read_bytes() for path in destination.parent.iterdir()}
+    replace_file = Mock()
+    monkeypatch.setattr(writer.os, "replace", replace_file)
+    with pytest.raises(writer.DatabaseError) as error:
+        writer.write_sqlite_database(prepared, destination)
+    assert str(destination) in str(error.value) and str(sidecar) in str(error.value)
+    assert "completed its transactions" in str(error.value)
+    replace_file.assert_not_called()
+    assert {path: path.read_bytes() for path in destination.parent.iterdir()} == before
+
+
+def test_final_sidecar_check_runs_under_lock_after_verification(prepared, tmp_path, monkeypatch):
+    destination = tmp_path / "output" / "components.sqlite"
+    writer.write_sqlite_database(prepared, destination)
+    before = destination.read_bytes()
+    sidecar = Path(str(destination) + "-journal")
+    verify = writer._verify_database
+
+    def external_journal_appears(snapshot, staging):
+        verify(snapshot, staging)
+        assert Path(str(destination) + ".sync.lock").is_file()
+        sidecar.write_bytes(b"appeared during staging verification")
+    monkeypatch.setattr(writer, "_verify_database", external_journal_appears)
+    with pytest.raises(writer.DatabaseError, match="publication blocked.*-journal"):
+        writer.write_sqlite_database(prepared, destination)
+    assert destination.read_bytes() == before
+    assert sidecar.read_bytes() == b"appeared during staging verification"
+    assert set(destination.parent.iterdir()) == {destination, sidecar}
+
+
+@pytest.mark.parametrize("entry", ["directory", "broken_symlink"])
+def test_any_sidecar_entry_blocks_publication(prepared, tmp_path, entry):
+    destination = tmp_path / "output" / "components.sqlite"
+    writer.write_sqlite_database(prepared, destination)
+    before = destination.read_bytes()
+    sidecar = Path(str(destination) + "-wal")
+    if entry == "directory":
+        sidecar.mkdir()
+    else:
+        try:
+            sidecar.symlink_to(destination.parent / "missing-target")
+        except OSError as exc:
+            pytest.skip(f"Symlink creation unavailable on this platform: {exc}")
+        assert not sidecar.exists() and sidecar.is_symlink()
+    with pytest.raises(writer.DatabaseError, match="publication blocked.*-wal"):
+        writer.write_sqlite_database(prepared, destination)
+    assert destination.read_bytes() == before
+    assert set(destination.parent.iterdir()) == {destination, sidecar}
+    assert sidecar.is_dir() if entry == "directory" else sidecar.is_symlink()
+
+
+def test_unreadable_sidecar_state_fails_closed(prepared, tmp_path, monkeypatch):
+    destination = tmp_path / "output" / "components.sqlite"
+    writer.write_sqlite_database(prepared, destination)
+    before = destination.read_bytes()
+    monkeypatch.setattr(Path, "lstat", Mock(side_effect=PermissionError("inspection denied")))
+    with pytest.raises(writer.DatabaseError, match="cannot inspect SQLite sidecar.*components.sqlite-wal.*inspection denied"):
+        writer.write_sqlite_database(prepared, destination)
+    assert destination.read_bytes() == before
+    assert [p.name for p in destination.parent.iterdir()] == [destination.name]
+
+
+def test_dangling_symlink_detection_without_platform_symlink_privileges(tmp_path, monkeypatch):
+    destination = tmp_path / "components.sqlite"
+    # A dangling link has a directory entry even though following it finds no file.
+    monkeypatch.setattr(Path, "exists", Mock(return_value=False))
+    monkeypatch.setattr(Path, "lstat", Mock(return_value=Mock(st_mode=stat.S_IFLNK)))
+    with pytest.raises(writer.DatabaseError, match="publication blocked.*components.sqlite-wal"):
+        writer._check_destination_state(destination)

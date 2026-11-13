@@ -161,6 +161,26 @@ def _verify_database(prepared: PreparedTables, staging: Path) -> None:
         _verify_connection(connection, prepared)
 
 
+def _check_destination_state(destination: Path) -> None:
+    """Fail closed on destination sidecars, without opening or repairing SQLite.
+
+    lstat detects entries even when they are dangling symlinks. This is a final
+    guard, not a lock against non-cooperating external SQLite consumers.
+    """
+    for suffix in ("-wal", "-shm", "-journal"):
+        sidecar = Path(str(destination) + suffix)
+        try:
+            sidecar.lstat()
+        except FileNotFoundError:
+            continue
+        except OSError as exc:
+            raise DatabaseError(f"Database publication blocked for {destination}: cannot inspect SQLite sidecar {sidecar}: {exc}") from None
+        raise DatabaseError(
+            f"Database publication blocked for {destination}: SQLite journal/sidecar exists: {sidecar}. "
+            "Close applications using the database and ensure SQLite has completed its transactions before retrying."
+        )
+
+
 @contextmanager
 def _destination_lock(destination: Path) -> Iterator[None]:
     lock = destination.with_name(destination.name + ".sync.lock")
@@ -203,6 +223,7 @@ def write_sqlite_database(prepared: PreparedTables, destination: Path) -> None:
                 os.close(descriptor)
                 _write_staging(prepared, staging)
                 _verify_database(prepared, staging)
+                _check_destination_state(destination)
                 os.replace(staging, destination)
                 published = True
             finally:

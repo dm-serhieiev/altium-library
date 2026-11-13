@@ -309,8 +309,13 @@ SQLite `NOCASE` забезпечує ASCII case-insensitive PK; Python global `c
 5. Повторно відкрити staging через escaped file URI з `mode=ro`. Вимагати `PRAGMA integrity_check` = `ok` і DELETE journal mode.
 6. Перевірити точний набір schema objects/table names; ordered columns через `table_xinfo`, TEXT types, nullability, default/PK/hidden flags; єдиний PK index та його NOCASE collation через `index_list`/`index_xinfo`.
 7. Явно вибрати всі ordered columns з `ORDER BY "IPN"`. Порівняти count, кожний IPN та кожне значення/NULL з `PreparedTables`. Expected ordering відтворює SQLite ASCII NOCASE; числової конверсії немає.
-8. Закрити verification connection. Виконати `os.replace(staging, destination)` на тому самому filesystem. Це єдина зміна published database.
-9. Видалити лише власні staging/journal artifacts і власний lock. Ідентичність lock перевіряється перед видаленням; чужий replacement lock не видаляється.
+8. Закрити verification connection. Під destination lock безпосередньо перед replacement викликати `_check_destination_state(destination)`: перевірити `<destination>-wal`, `-shm`, `-journal` через `lstat()`, не відкриваючи published database у SQLite.
+9. Якщо sidecars відсутні, виконати `os.replace(staging, destination)` на тому самому filesystem. Це єдина зміна published database.
+10. Видалити лише власні staging/journal artifacts і власний lock. Ідентичність lock перевіряється перед видаленням; чужий replacement lock не видаляється.
+
+Перевірка sidecars є консервативною fail-closed: будь-який filesystem entry (також zero-length file, directory чи broken symlink) блокує публікацію. Sidecar без самого destination також є блокером. Неможливість перевірити стан через filesystem error завершує операцію помилкою. `DatabaseError` / CLI `4` містить destination і конфліктний sidecar path. Старий database та всі зовнішні sidecars лишаються незмінними; поточний staging і власний lock прибираються. WAL/SHM/journal можуть належати активній або перерваній транзакції; заміна лише основного файла може створити неузгоджений стан. Автоматичного checkpoint, repair/recovery чи видалення зовнішніх journals немає.
+
+Destination lock координує лише процеси `inventree-sync`. Він не блокує Altium, DB Browser або інші SQLite consumers. Sidecar check не виявляє кожного зовнішнього reader і не усуває race між перевіркою та replacement. `os.replace` сам по собі не гарантує безпечної заміни database, яку довільний зовнішній застосунок активно використовує. Перед sync закрити зовнішніх consumers звичайним способом; Windows replacement-lock errors, як і раніше, повертаються явно.
 
 Помилки creation/insertion/commit/verification/replacement не змінюють попередній published file. Якщо Windows/Altium/інший процес блокує replacement, повертається зрозуміла помилка з destination; нікого не закриваємо примусово й не видаляємо чужі journal/lock files. Якщо після успішної публікації не вдалося прибрати власний lock, помилка прямо вказує, що файл уже опубліковано, але cleanup не завершено.
 
@@ -318,7 +323,7 @@ SQLite `NOCASE` забезпечує ASCII case-insensitive PK; Python global `c
 
 ### 7.3. Відновлення після помилки
 
-При data validation error виправити InvenTree або конфігурацію й повторити `validate`, потім `sync`. Попередня база зберігається. При publication error закрити споживача бази звичайним способом і повторити sync.
+При data validation error виправити InvenTree або конфігурацію й повторити `validate`, потім `sync`. Попередня база зберігається. При publication error закрити споживача бази звичайним способом і повторити sync. Якщо виявлено WAL/SHM/journal, дати SQLite завершити транзакції й нормальне journal cleanup. Якщо sidecars залишаються, скористатися штатною SQLite recovery-процедурою застосунку-власника; не видаляти journals вручну для обходу блокування. Скрипт не ремонтує існуючу базу і не видаляє зовнішні journals.
 
 Lock не знімається автоматично за віком або PID: це може бути активний чи перерваний процес. Для stale `<destination>.sync.lock` перевірити записаний PID та переконатися, що жоден sync до цього destination не працює, зокрема в іншій сесії. Лише тоді вручну видалити цей lock. Після аварійного завершення можуть залишитися унікальні staging files; після тієї самої перевірки прибрати лише підтверджені abandoned staging artifacts, ніколи published database або SQLite journal іншого застосунку. Відновлення staging не виконується; наступний sync будує новий snapshot.
 
@@ -347,7 +352,7 @@ symbols = "../../symbols"
 footprints = "../../footprints"
 ```
 
-Усі filesystem paths прив'язуються до директорії TOML через `pathlib.Path.resolve()`, а не до cwd, Python або модуля CLI. Абсолютні шляхи також допустимі. SQLite output незалежний від DbLib; DbLib і його папка можуть ще не існувати. Output не може збігатися з конфігурацією/DbLib або мати розширення Altium library. `sync` за потреби створює output directory, `validate` її не створює.
+Усі filesystem paths прив'язуються до директорії TOML через `pathlib.Path.resolve()`, а не до cwd, Python або модуля CLI. Абсолютні шляхи також допустимі. SQLite output незалежний від DbLib; DbLib і його папка можуть ще не існувати. Для `validate`/`sync` дозволені лише розширення `.sqlite` та `.sqlite3` без урахування регістру (`.SQLITE`/`.SQLITE3` також допустимі). `.accdb`, `.db`, Altium extensions, `.txt` і шляхи без розширення відхиляються через `ConfigError` / CLI `2` до retrieval або output writes. Output також не може збігатися з конфігурацією/DbLib. `sync` за потреби створює output directory, `validate` її не створює. `inspect` не вимагає export settings. Git ignore rules охоплюють обидва розширення та sidecars у `database/`, staging і sync locks, зберігаючи можливість версіонувати SQL fixtures/source files.
 
 `inspect` приймає попередню конфігурацію лише з `[inventree]` і `[scope]`. Для `validate`/`sync` обов'язкові обидві секції `[sync]` та `[libraries]` з усіма ключами. Невідомі sections/settings відхиляються без виведення їхніх значень. Немає backend selector, driver, DSN, database credentials або category/parameter/unit profiles у конфігурації. SQLite ODBC connection налаштовується окремо у споживача.
 
@@ -376,7 +381,7 @@ if (-not (Test-Path -LiteralPath ./tools/inventree-sync/config.toml)) {
 
 ### 8.1. Перегляд і підключення до Altium
 
-Після успішного sync відкрити `components.sqlite` у DB Browser for SQLite або SQLiteStudio. Перевірити список компонентних таблиць, структуру TEXT полів та Browse Data; для стабільного читання використовувати `SELECT ... ORDER BY "IPN"`. Не зберігати ручні виправлення як джерело даних: наступний snapshot їх замінить. Закрити viewer перед публікацією на Windows, якщо він утримує файл.
+Після успішного sync відкрити `components.sqlite` або налаштований `.sqlite3` файл у DB Browser for SQLite або SQLiteStudio. Перевірити список компонентних таблиць, структуру TEXT полів та Browse Data; для стабільного читання використовувати `SELECT ... ORDER BY "IPN"`. Не зберігати ручні виправлення як джерело даних: наступний snapshot їх замінить. Перед наступним sync закрити viewer, Altium та інших SQLite consumers, щоб вони завершили транзакції й нормальне journal cleanup.
 
 У Altium повторно використати SQLite ODBC driver/DSN або connection string, з яким користувач уже перевірив sample DbLib; шлях бази змінити на абсолютний шлях `sync.output`. Драйвер має відповідати розрядності Altium. У Database Library вибрати це connection, увімкнути поточні непорожні таблиці й призначити `IPN` ключем. Налаштувати наведений у розділі 6 mapping `Library Ref`, `Library Path`, `Footprint Ref`, `Footprint Path`; квадратні дужки у mapping позначають спеціальні цілі Altium, не SQL quoting і не частину database column names.
 
@@ -396,7 +401,7 @@ config + runtime token
   → exclusive destination lock → unique staging у destination directory
   → DELETE journal + transaction → commit → close
   → read-only reopen → integrity/schema/constraints/complete data verification
-  → close → os.replace → cleanup [1D, sync]
+  → close → final destination WAL/SHM/journal check під lock → os.replace → cleanup [1D, sync]
   → components.sqlite → SQLite ODBC → Altium DbLib
 ```
 

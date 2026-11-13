@@ -71,10 +71,14 @@ config.toml
 config.local.toml
 
 # Generated SQLite snapshots in the repository output directory
-/database/*.sqlite
-/database/*.sqlite-journal
-/database/*.sqlite-wal
-/database/*.sqlite-shm
+/database/*.[sS][qQ][lL][iI][tT][eE]
+/database/*.[sS][qQ][lL][iI][tT][eE]-journal
+/database/*.[sS][qQ][lL][iI][tT][eE]-wal
+/database/*.[sS][qQ][lL][iI][tT][eE]-shm
+/database/*.[sS][qQ][lL][iI][tT][eE]3
+/database/*.[sS][qQ][lL][iI][tT][eE]3-journal
+/database/*.[sS][qQ][lL][iI][tT][eE]3-wal
+/database/*.[sS][qQ][lL][iI][tT][eE]3-shm
 # Unique staging files and destination locks owned by inventree-sync
 *.staging.sqlite
 *.staging.sqlite-journal

@@ -152,3 +152,51 @@ def test_complete_cli_with_only_mocked_http(export_config, export_dataset, monke
     assert runtime_token not in result.out + result.err
     assert "Authorization" not in result.out + result.err
     assert load_config(export_config).sync.output.exists() == (command == "sync")
+
+
+@pytest.mark.parametrize("command", ["validate", "sync"])
+@pytest.mark.parametrize("extension", [".accdb", ".db", ".SchLib", ".txt", ""])
+def test_invalid_output_extension_fails_before_retrieval(export_config, source_dataset, tmp_path, capsys, command, extension):
+    export_config.write_text(export_config.read_text(encoding="utf-8").replace("components.sqlite", "components" + extension), encoding="utf-8")
+    destination = load_config(export_config).sync.output
+    destination.parent.mkdir()
+    destination.write_bytes(b"unrelated existing file")
+    before = {path: path.read_bytes() for path in tmp_path.rglob("*") if path.is_file()}
+    assert main([command, "--config", str(export_config)]) == 2
+    result = capsys.readouterr()
+    assert "Configuration error" in result.err and ".sqlite or .sqlite3" in result.err
+    assert result.out == ""
+    source_dataset.assert_not_called()
+    assert {path: path.read_bytes() for path in tmp_path.rglob("*") if path.is_file()} == before
+
+
+@pytest.mark.parametrize("extension", [".sqlite3", ".SQLITE", ".SQLITE3"])
+def test_sync_supported_output_extensions(export_config, source_dataset, capsys, extension):
+    export_config.write_text(export_config.read_text(encoding="utf-8").replace("components.sqlite", "components" + extension), encoding="utf-8")
+    assert main(["sync", "--config", str(export_config)]) == 0
+    destination = load_config(export_config).sync.output
+    with closing(sqlite3.connect(destination)) as connection:
+        assert connection.execute("PRAGMA integrity_check").fetchone() == ("ok",)
+    assert "Synchronization successful" in capsys.readouterr().out
+    assert [path.name for path in destination.parent.iterdir()] == [destination.name]
+
+
+def test_inspect_does_not_require_valid_export_extension(export_config, source_dataset, capsys):
+    export_config.write_text(export_config.read_text(encoding="utf-8").replace("components.sqlite", "components.accdb"), encoding="utf-8")
+    assert main(["inspect", "--config", str(export_config)]) == 0
+    assert "Nested parameter retrieval: used" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("suffix", ["-wal", "-shm", "-journal"])
+def test_journal_conflict_reports_exit_code_four_and_preserves_files(export_config, source_dataset, tmp_path, capsys, suffix):
+    assert main(["sync", "--config", str(export_config)]) == 0
+    capsys.readouterr()
+    destination = load_config(export_config).sync.output
+    sidecar = Path(str(destination) + suffix)
+    sidecar.write_bytes(b"another SQLite consumer's sidecar")
+    before = {path: path.read_bytes() for path in tmp_path.rglob("*") if path.is_file()}
+    assert main(["sync", "--config", str(export_config)]) == 4
+    result = capsys.readouterr()
+    assert "Database error" in result.err and str(sidecar) in result.err
+    assert "publication blocked" in result.err and result.out == ""
+    assert {path: path.read_bytes() for path in tmp_path.rglob("*") if path.is_file()} == before

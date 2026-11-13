@@ -138,3 +138,23 @@ def test_absolute_paths_preserved(export_config, tmp_path):
     export_config.write_text(export_config.read_text(encoding="utf-8").replace("../database/components.sqlite", destination), encoding="utf-8")
     assert load_config(export_config).sync.output == Path(destination)
 
+
+@pytest.mark.parametrize("extension", [".sqlite", ".sqlite3", ".SQLITE", ".SQLITE3", ".SqlItE3"])
+def test_supported_output_extensions(export_config, extension):
+    export_config.write_text(export_config.read_text(encoding="utf-8").replace("components.sqlite", "components" + extension), encoding="utf-8")
+    config = load_config(export_config)
+    sync, _ = require_export_settings(config)
+    assert sync.output.name == "components" + extension
+
+
+@pytest.mark.parametrize("extension", [".accdb", ".db", ".SchLib", ".PcbLib", ".DbLib", ".txt", "", ".sqlite.bak"])
+def test_unsupported_output_extensions_preserve_existing_files(export_config, tmp_path, extension):
+    export_config.write_text(export_config.read_text(encoding="utf-8").replace("components.sqlite", "unsupported-output" + extension), encoding="utf-8")
+    config = load_config(export_config)
+    config.sync.output.parent.mkdir()
+    config.sync.output.write_bytes(b"unrelated existing file")
+    before = {path: path.read_bytes() for path in tmp_path.rglob("*") if path.is_file()}
+    with pytest.raises(ConfigError, match=r"sync.output.*\.sqlite or \.sqlite3"):
+        require_export_settings(config)
+    assert {path: path.read_bytes() for path in tmp_path.rglob("*") if path.is_file()} == before
+

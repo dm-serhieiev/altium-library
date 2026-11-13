@@ -77,8 +77,8 @@ def require_export_settings(config: Config) -> tuple[SyncSettings, LibrarySettin
         raise ConfigError("validate/sync require [sync] output/dblib and [libraries] symbols/footprints")
     if config.sync.output in (config.source, config.sync.dblib):
         raise ConfigError("sync.output must differ from the configuration and sync.dblib paths")
-    if config.sync.output.suffix.casefold() in {".schlib", ".pcblib", ".dblib"}:
-        raise ConfigError("sync.output must be a database path, not an Altium library file")
+    if config.sync.output.suffix.casefold() not in {".sqlite", ".sqlite3"}:
+        raise ConfigError("sync.output must use a .sqlite or .sqlite3 extension (case-insensitive)")
     return config.sync, config.libraries
 
 

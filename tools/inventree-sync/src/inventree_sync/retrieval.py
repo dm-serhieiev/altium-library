@@ -5,9 +5,11 @@ from pathlib import Path
 from types import MappingProxyType
 from typing import Mapping
 
+from requests.auth import HTTPBasicAuth
+
 from .api import InvenTreeClient
 from .categories import CategoryTree, build_category_tree, group_parts, validate_part_placement
-from .config import load_config
+from .config import Config, load_config
 from .models import Parameter, ParameterTemplate, Part
 
 
@@ -26,14 +28,14 @@ class PreparedDataset:
     groups: Mapping[int, tuple[Part, ...]]  # Non-empty leaf category PK -> Parts
 
 
-def retrieve_dataset(config_path: str | Path) -> PreparedDataset:
+def retrieve_dataset(config_path: str | Path | Config, auth: HTTPBasicAuth | None = None) -> PreparedDataset:
     """Load config and fetch exactly categories plus scoped, nested Parts.
 
     Return only after all pages and local validations succeed. There is no
     automatic fallback to standalone parameter/template endpoints.
     """
-    config = load_config(config_path)
-    with InvenTreeClient(config.inventree) as client:
+    config = config_path if isinstance(config_path, Config) else load_config(config_path)
+    with InvenTreeClient(config.inventree, auth=auth) as client:
         tree = build_category_tree(client.iter_categories())
         root_pk = tree.resolve_path(config.scope.root_category_path)
         scope = tree.subtree(root_pk)

@@ -1,6 +1,6 @@
 # Архітектура inventree-sync: InvenTree → таблиці компонентів → Altium DbLib
 
-Статус: Milestone 1A — основа й API-клієнт; Milestone 1B — scoped retrieval та `inspect`; Milestone 1C — динамічна схема, Altium-перетворення та unit-aware `PreparedTables`; Milestone 1D — SQLite writer, перевірка, безпечна публікація та робочі `validate`/`sync`.
+Статус: Milestone 1A — основа й API-клієнт; Milestone 1B — scoped retrieval та `inspect`; Milestone 1C — динамічна схема, Altium-перетворення та unit-aware `PreparedTables`; Milestone 1D — SQLite writer і безпечна публікація; Milestone 1D.1 — interactive Basic Auth, короткий CLI, external config/first run, Windows executable/launcher та `InvenTree PK`.
 
 Назва програми та console command — `inventree-sync`, назва Python-пакета — `inventree_sync`. Синхронізація одностороння: InvenTree є джерелом істини, згенерована база — відтворюваним проміжним артефактом для Altium DbLib. Скрипт читає InvenTree і не змінює його категорії або компоненти.
 
@@ -20,6 +20,7 @@ InvenTree є єдиним джерелом істини для дерева ка
 - Назва таблиці точно дорівнює `category.name`, без aliases, префіксів і суфіксів.
 - Один InvenTree Part → один рядок. Stock Item, Supplier Part і Manufacturer Part не створюють додаткових рядків.
 - `Part.IPN` → колонка `IPN`, ключ і назва компонента у базі Altium. `Part.name` не використовується як заміна.
+- `Part.pk` → generated `InvenTree PK` як canonical positive decimal text, глобально унікальний у всьому export. Це звичайний Altium design parameter, не новий SQLite primary key.
 - Інші поля компонента беруться з фактичних параметрів конкретного Part. Виняток — чотири технічні колонки, обчислені з двох Altium-посилань.
 - IPN не генерується заново і не розбирається для отримання Value, Package чи електричних характеристик.
 - За замовчуванням експортуються всі Parts у вибраному дереві; фільтри active/template/virtual можливі лише явно в конфігурації, із кількістю виключених записів у звіті.
@@ -75,7 +76,7 @@ class InvenTreeClient:
     def iter_parameter_templates(self): ...   # лише діагностика
     def iter_part_parameters(self): ...       # лише діагностика
 
-def retrieve_dataset(config_path) -> PreparedDataset: ...
+def retrieve_dataset(config_path: str | Path | Config, auth: HTTPBasicAuth | None = None) -> PreparedDataset: ...
 def build_category_tree(categories): ...
 def build_table_schemas(dataset: PreparedDataset) -> tuple[TableSchema, ...]: ...
 def parse_model_ref(value: str, kind: ModelKind) -> ModelRef: ...
@@ -92,7 +93,13 @@ HTTP-відповіді нормалізує `adapters.py`; решта прог�
 
 ## 3. Авторизація і REST API
 
-Реалізований спосіб — токен зі змінної, заданої `inventree.token_env` (типово `INVENTREE_API_TOKEN`), заголовок `Authorization: Token <token>`. Запланована альтернатива HTTP Basic ще не реалізована; у майбутньому вона допускається лише через HTTPS із username і паролем через `getpass` або env. Не потрібні браузерний логін або збереження сесійних cookies. Токен, пароль і HTTP-заголовки не потрапляють у конфігурацію, Git або звіт. [Документація авторизації InvenTree](https://docs.inventree.org/en/latest/api/).
+Типово `inventree.auth="basic"`: CLI один раз за виконання запитує Username через `input()` та Password через `getpass()`, створює `requests.auth.HTTPBasicAuth` і явно передає його через retrieval до `InvenTreeClient`. Всі сторінки/повторні GET використовують цей runtime object; немає глобального auth state чи повторного login prompt. Username непорожній, без двокрапки; password непорожній. `getpass.GetPassWarning` перетворюється на помилку до insecure echoed fallback. Недоступний/скасований interactive input — `ConfigError` / CLI `2`.
+
+Credentials живуть лише в пам'яті процесу: не записуються у TOML, `.env`, Credential Manager, logs/reports, password CLI arguments або persistent tokens. Програма не створює й не запитує API tokens. Python не гарантує негайне стирання рядків із пам'яті. Requests HTTPBasicAuth використовує Latin-1 encoding; непідтримані символи дають безпечну помилку без виведення credentials.
+
+HTTP і HTTPS дозволені, також local HTTP; HTTPS використовує звичайну certificate verification. HTTPS enforcement, certificate management і глобальне вимкнення TLS verification не додаються. Basic Auth не шифрує credentials поверх HTTP. Redirects не виконуються, `.netrc`/неявне environment auth не використовуються, cookies очищуються після response. Timeout, connection/TLS failure, HTTP 401 (invalid credentials/можлива server policy), HTTP 403 (permissions) мають окремі безпечні повідомлення. Explicit unsupported auth challenge дає окремий діагноз; не кожний сервер дозволяє однозначно відрізнити неправильний пароль від забороненого Basic Auth через HTTP 401. MFA/SSO policies можуть не підтримувати цей режим; автоматичного fallback немає. [InvenTree API authentication](https://docs.inventree.org/en/stable/api/#authentication), [Requests Basic Auth](https://requests.readthedocs.io/en/latest/user/authentication/#basic-authentication).
+
+Legacy `auth="token"` залишається явним opt-in: токен береться зі змінної `token_env` (типово `INVENTREE_API_TOKEN`) без credential prompt. Basic mode не потребує token/env. Старі config не переписуються: для interactive workflow користувач змінює `auth` на `basic` вручну.
 
 ### 3.1. Основний шлях читання — InvenTree 1.5.6, API schema 530
 
@@ -169,7 +176,7 @@ InvenTree під час створення Part додає до нього па�
   → логічні колонки
 ```
 
-Порядок технічних колонок фіксований: `IPN`, `Library Ref`, `Library Path`, `Footprint Ref`, `Footprint Path`.
+Порядок шести технічних колонок фіксований: `IPN`, `Library Ref`, `Library Path`, `Footprint Ref`, `Footprint Path`, `InvenTree PK`. Перші п'ять позицій зберігаються. `InvenTree PK` не входить у union templates; однойменний звичайний ParameterTemplate, також без урахування регістру, є column conflict.
 
 Після них ідуть параметри InvenTree **строго за зростанням PK `ParameterTemplate`**. Milestone 1C уточнює попередній дизайн: порядок із API більше не є альтернативою. Порядок Parts, параметрів і словників на вході не змінює порядок колонок.
 
@@ -187,7 +194,7 @@ InvenTree під час створення Part додає до нього па�
 
 Значення завжди береться з фактичного параметра конкретного Part. Default шаблону не підставляється приховано.
 
-На рівні контракту експорту обов'язкові лише `Part.IPN`, `Altium Symbol` і `Altium Footprint`. `inventree-sync` не намагається повторно реалізувати required-логіку category assignments InvenTree для інших параметрів.
+На рівні контракту експорту обов'язкові `Part.IPN`, positive integer `Part.pk`, `Altium Symbol` і `Altium Footprint`. `inventree-sync` не намагається повторно реалізувати required-логіку category assignments InvenTree для інших параметрів.
 
 Одиниці та choice lists залишаються метаданими InvenTree. Вони не дублюються в локальній конфігурації та не визначають набір колонок. Наявні `ParameterTemplate.units` використовуються лише шаром перетворення для остаточного тексту звичайних параметрів у `PreparedTables`.
 
@@ -204,7 +211,7 @@ InvenTree під час створення Part додає до нього па�
 - Голий SI-префікс означає відсутність одиниці (`10k`, `100n`, `4.7u`). Виняток — `m`: коли це не сумісна одиниця довжини, він неоднозначний між milli і metre та дає помилку. Невідомий суфікс/вираз з units також дає помилку замість припущення. Без units довільний текст залишається дозволеним.
 - Очевидний конфлікт, наприклад `10 V` при units=`ohm`, завершується `ExportValidationError` із Part PK/IPN, template PK/name, початковим data, units та причиною. Немає часткового результату або виправлення джерела.
 
-Форматування застосовується лише до звичайних динамічних колонок, не до IPN, чотирьох технічних полів моделі чи CAD source parameters. Десяткові роздільники, префікси та написання наявних одиниць не нормалізуються.
+Форматування застосовується лише до звичайних динамічних колонок, не до IPN, InvenTree PK, чотирьох технічних полів моделі чи CAD source parameters. Десяткові роздільники, префікси та написання наявних одиниць не нормалізуються.
 
 Окрім виключення CAD-колонок і форматування одиниць, спеціальний контракт формування DbLib-запису — `Part.IPN` та source parameters `Altium Symbol` і `Altium Footprint`. Їх спеціальна семантика описана в наступному розділі.
 
@@ -232,6 +239,7 @@ Altium Footprint = Resistors:RES_0603_H0.55
 | Library Path | ..\symbols\Passives.SchLib | [Library Path] |
 | Footprint Ref | RES_0603_H0.55 | [Footprint Ref] |
 | Footprint Path | ..\footprints\Resistors.PcbLib | [Footprint Path] |
+| InvenTree PK | 1257 | InvenTree PK |
 | Value | 10k | Value |
 | Package | 0603 | Package |
 | Mounting Type | SMD | Mounting Type |
@@ -240,6 +248,8 @@ Altium Footprint = Resistors:RES_0603_H0.55
 | Power Rating | 0.1 W | Power Rating |
 
 `IPN` — ідентифікатор запису бази, `Library Ref` — назва спільного символу. Вони не повинні збігатися. `Altium Symbol` і `Altium Footprint` є лише джерелами чотирьох технічних полів і не експортуються як окремі колонки. `KiCad Symbol` і `KiCad Footprint` ігноруються Altium-перетворенням.
+
+`InvenTree PK` походить тільки від `Part.pk`: наприклад integer `1257` → TEXT `"1257"`, без префіксів/leading zeros. Не виводити його з IPN, name, description, category/stock/manufacturer PK або ordinary parameter. `validate_row` вимагає `[1-9][0-9]*`, а writer перевіряє глобальну унікальність у всіх таблицях. У Altium DbLib один раз вручну додати Field Mapping: Database Field Name `InvenTree PK` → Design Parameter `InvenTree PK`, **без квадратних дужок**. Після placement нового компонента перевірити параметр; існуючі schematic components не змінюються автоматично. IPN залишається primary key, `Comment =Value` зберігається, автоматичних `.DbLib`/library edits немає.
 
 `Comment` або `Description` експортуються лише за наявності однойменних звичайних параметрів Part. Скрипт не генерує `Comment` з `Value`, `Part.name`, `Part.description` або IPN. Перевірений користувачем підхід використовує Comment string символу `=Value`, що посилається на звичайний database parameter `Value`. Скрипт не змінює `.SchLib` для цього налаштування.
 
@@ -268,7 +278,7 @@ from inventree_sync.retrieval import retrieve_dataset
 from inventree_sync.schema import build_table_schemas
 from inventree_sync.transform import LibraryLayout, prepare_tables
 
-dataset = retrieve_dataset(config_path)  # HTTP тільки на етапі Milestone 1B
+dataset = retrieve_dataset(config_path, auth=runtime_basic_auth)  # HTTP тільки у retrieval
 layout = LibraryLayout(target_dblib, symbol_directory, footprint_directory)
 schemas = build_table_schemas(dataset)  # необов'язково, для аналізу колонок
 prepared = prepare_tables(dataset, layout)
@@ -292,6 +302,7 @@ print(dict(table.rows[0]))  # зручний breakpoint для перегляд�
 |---|---|
 | IPN | `TEXT NOT NULL PRIMARY KEY COLLATE NOCASE` |
 | Library Ref, Library Path, Footprint Ref, Footprint Path | `TEXT NOT NULL` |
+| InvenTree PK | `TEXT NOT NULL`, canonical positive decimal, globally unique; без додаткового index |
 | Звичайні динамічні параметри | `TEXT`, nullable |
 
 SQLite `NOCASE` забезпечує ASCII case-insensitive PK; Python global `casefold` перевірка додатково зберігає попередній контракт для всього набору. Додаткові identifiers/лічильники, поля, triggers або user tables не створюються. SQLite автоматично створює службовий PK index; це не компонентна таблиця.
@@ -334,8 +345,7 @@ Lock не знімається автоматично за віком або PID
 ```toml
 [inventree]
 base_url = "https://inventree.example.com"
-auth = "token"
-token_env = "INVENTREE_API_TOKEN"
+auth = "basic"
 connect_timeout = 10
 read_timeout = 60
 retries = 3
@@ -371,13 +381,25 @@ if (-not (Test-Path -LiteralPath ./tools/inventree-sync/config.toml)) {
 & ./tools/inventree-sync/.venv/Scripts/inventree-sync.exe sync --config ./tools/inventree-sync/config.toml
 ```
 
-У локальному TOML вказати server URL без `/api/` і scope path. Для старого config додати `[sync]`/`[libraries]` за прикладом, не перезаписуючи локальні settings. Токен надходить зі змінної `INVENTREE_API_TOKEN` або іншої, заданої `token_env`. Його можна безпечно ввести через Python `getpass` і передати дочірньому процесу в env; не вставляти token literal в command history, TOML або Git. Програма сама не читає `.env`: якщо він використовується, завантаження env виконує середовище запуску. `python -m inventree_sync <command> --config ...` еквівалентний console command.
+У локальному TOML вказати server URL без `/api/` і scope path. Для старого config додати `[sync]`/`[libraries]` за прикладом, не перезаписуючи локальні settings; для interactive login змінити старе `auth="token"` на `basic`. Basic credentials запитуються один раз на команду й не зберігаються. `.env` не завантажується програмою; legacy token mode потребує свого env лише коли явно вибраний.
+
+### 8.0. Milestone 1D.1 — короткий CLI, first run і Windows packaging
+
+`inventree-sync` без команди дорівнює `inventree-sync sync`. `sync`, `validate`, `inspect`, `--help` залишаються доступними; `--config` необов'язковий до чи після команди. CLI показує server, запитує credentials і виводить progress retrieval, preparation та SQLite validation/generation/publication; OK/success з'являється лише після завершення відповідної операції. Sync не виконує зайву повну validation перед writer, який уже її робить.
+
+Без `--config` source mode використовує зовнішній `tools/inventree-sync/config.toml` від location модуля, frozen mode — від location зовнішнього exe (`sys.executable`) та repository layout, ніколи cwd чи `_MEIPASS`. Standalone exe поза repo може використовувати config/example поруч із собою. Якщо default config відсутній, `initialize_config` читає external `config.example.toml`, запитує server URL і root path (типово `Electronic Components`), зберігає всі example filesystem paths та створює TOML через exclusive `open("x")`. Існуючий config ніколи не переписується. Explicit missing `--config` є помилкою, не setup request. First-run setup може створити config навіть перед validate/inspect, але database outputs ці команди не створюють. Credentials запитуються після setup і до config не потрапляють.
+
+Для звичайного Windows користувача розпакувати workflow artifact ZIP поверх repository root й виконати ` .\sync`, `.\sync validate`, `.\sync inspect`, `.\sync --help`. `sync.cmd` знаходить `tools/inventree-sync/dist/inventree-sync.exe` відносно себе, передає arguments через stock PowerShell `launch.ps1` і зберігає exit code. Helper не змінює environment користувача й нічого не інсталює. Для Explorer double-click нової console він лишає вікно відкритим; redirected/automated та existing-terminal invocations не мають зайвої паузи. Detection використовує console process list і parent `cmd /c`; якщо detection недоступний, helper не блокує automation.
+
+Build: `powershell -NoProfile -ExecutionPolicy Bypass -File tools/inventree-sync/build.ps1` на Windows із Python 3.11+. Script створює ignored `.venv-build`, інсталює `[test,build]`, запускає offline tests, PyInstaller `--onefile --console`, потім Windows smoke tests через `--sync-executable`. Output — `tools/inventree-sync/dist/inventree-sync.exe` та ZIP `inventree-sync-windows.zip`. У ZIP тільки maintained launcher/helper/example/README і generated exe, не local config, credentials чи libraries. PyInstaller — build-only dependency, Python runtime/dependencies bundled. Config, `.DbLib`, `.SchLib`, `.PcbLib` залишаються зовнішніми й TOML-configurable. Windows workflow будує ZIP й завантажує workflow artifact; generated executables не комітяться. [PyInstaller external executable location](https://pyinstaller.org/en/stable/runtime-information.html#using-sys-executable-and-sys-argv-0).
+
+Smoke tests запускають exe з unrelated cwd і без Python у runtime PATH, перевіряють help, external config/first run, launcher arguments/exit codes та real secure getpass через hidden Windows console. API — тільки локальний synthetic HTTP fixture, не production InvenTree. Developer workflow лишається `python -m inventree_sync` після editable installation.
 
 - `inspect`: тільки попереднє scoped retrieval та структурна перевірка, summary root/category/Parts/parameter/template counts. Не виконує Altium-перетворення або SQLite generation.
 - `validate`: завантаження повної конфігурації, незмінний retrieval API, `prepare_tables`, library-file existence/model-ref checks та реальна in-memory SQLite schema/insertion/verification. Summary містить root, table/component/library counts, SQLite/reference status. Немає filesystem output, lock або published database changes. Binary models не перевіряються.
 - `sync`: ті самі source/transformation checks, повна SQLite validation, staging, reopen verification і atomic publish. Summary містить destination, table/component counts, integrity/publication status.
 
-Коди завершення: `0` успіх; `1` неочікувана внутрішня помилка; `2` configuration/data validation; `3` API/authentication; `4` database/filesystem/locking/publication. Відсутній API token, як і раніше, є configuration error (`2`). `DatabaseError` відокремлений від `ExportValidationError`. Secrets, Authorization headers і raw payloads не виводяться; unexpected exceptions мають безпечне generic повідомлення.
+Коди завершення: `0` успіх; `1` неочікувана внутрішня помилка; `2` configuration/data validation або недоступний secure input; `3` API/authentication; `4` database/filesystem/locking/publication. Відсутній token є configuration error (`2`) тільки в explicit legacy token mode. `DatabaseError` відокремлений від `ExportValidationError`. Secrets, Authorization headers і raw payloads не виводяться; unexpected exceptions мають безпечне generic повідомлення.
 
 ### 8.1. Перегляд і підключення до Altium
 
@@ -390,7 +412,7 @@ if (-not (Test-Path -LiteralPath ./tools/inventree-sync/config.toml)) {
 ## 9. Послідовність і контроль якості
 
 ```text
-config + runtime token
+external config + runtime Basic credentials (або explicit legacy token)
   → повне дерево категорій → root PK
   → Parts?category=<root_pk>&cascade=true&parameters=true (всі сторінки)
   → PreparedDataset [1B, inspect]

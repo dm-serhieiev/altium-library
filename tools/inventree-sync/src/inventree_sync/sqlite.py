@@ -33,6 +33,7 @@ def _validate_prepared(prepared: PreparedTables) -> None:
     names: set[str] = set()
     categories: set[int] = set()
     ipns: dict[str, str] = {}
+    part_pks: dict[str, str] = {}
     for table in prepared.tables:
         context = f"Table {table.name!r}, category pk={table.category_pk} path={table.category_path!r}"
         try:
@@ -44,10 +45,10 @@ def _validate_prepared(prepared: PreparedTables) -> None:
         names.add(table.name.casefold())
         categories.add(table.category_pk)
         validate_columns(table.columns, context)
-        if table.columns[:5] != TECHNICAL_COLUMNS:
-            raise ExportValidationError(f"{context}: expected the five ordered technical columns")
+        if table.columns[:len(TECHNICAL_COLUMNS)] != TECHNICAL_COLUMNS:
+            raise ExportValidationError(f"{context}: expected the six ordered technical columns")
         templates: set[int] = set()
-        for column in table.columns[5:]:
+        for column in table.columns[len(TECHNICAL_COLUMNS):]:
             if column.name in EXCLUDED_EXPORT_PARAMETERS:
                 raise ExportValidationError(f"{context}: source-only CAD column {column.name!r} must not be exported")
             if type(column.template_pk) is not int or column.template_pk <= 0 or column.template_pk in templates:
@@ -64,6 +65,10 @@ def _validate_prepared(prepared: PreparedTables) -> None:
             if key in ipns:
                 raise ExportValidationError(f"{source}: duplicate IPN with {ipns[key]}")
             ipns[key] = source
+            part_pk = row["InvenTree PK"]
+            if part_pk in part_pks:
+                raise ExportValidationError(f"{source}: duplicate InvenTree PK {part_pk!r} with {part_pks[part_pk]}")
+            part_pks[part_pk] = source
 
 
 def _populate(connection: sqlite3.Connection, prepared: PreparedTables) -> None:

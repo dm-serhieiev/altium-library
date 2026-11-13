@@ -1,0 +1,60 @@
+[OutputDatabaseLinkFile]
+Version=1.1
+[DatabaseLinks]
+ConnectionString=Provider=MSDASQL.1;Persist Security Info=False;Extended Properties="Driver=SQLite3 ODBC Driver;Database=C:\Users\sdv2000\Documents\own-projects\altium-library\database\components.sqlite";
+AddMode=3
+RemoveMode=1
+UpdateMode=2
+ViewMode=0
+LeftQuote=[
+RightQuote=]
+QuoteTableNames=1
+UseTableSchemaName=0
+DefaultColumnType=VARCHAR(255)
+LibraryDatabaseType=
+LibraryDatabasePath=
+DatabasePathRelative=0
+TopPanelCollapsed=0
+LibrarySearchPath=
+OrcadMultiValueDelimiter=,
+SearchSubDirectories=0
+SchemaName=ALTIUM
+LastFocusedTable=Ceramic Capacitors
+[Table1]
+SchemaName=
+TableName=Ceramic Capacitors
+Enabled=True
+UserWhere=0
+UserWhereText=
+BrowserOrder_Sorting=
+BrowserOrder_Grouping=
+BrowserOrder_Visible=IPN0=237|Library Ref0=132|Library Path0=230|Footprint Ref0=151|Footprint Path0=265|Value0=90|Package0=112|Mounting Type0=170|Capacitance0=145|Voltage Rating0=166|Dielectric0=121
+[Table2]
+SchemaName=
+TableName=Fixed Resistors
+Enabled=True
+UserWhere=0
+UserWhereText=
+BrowserOrder_Sorting=
+BrowserOrder_Grouping=
+BrowserOrder_Visible=IPN0=194|Library Ref0=132|Library Path0=230|Footprint Ref0=151|Footprint Path0=250|Value0=90|Package0=112|Mounting Type0=170|Resistance0=130|Tolerance0=125|Power Rating0=154
+[FieldMap1]
+Options=FieldName=Ceramic Capacitors.IPN|TableNameOnly=Ceramic Capacitors|FieldNameOnly=IPN|FieldType=0|ParameterName=IPN|VisibleOnAdd=False|AddMode=0|RemoveMode=0|UpdateMode=0
+[FieldMap2]
+Options=FieldName=Ceramic Capacitors.Library Ref|TableNameOnly=Ceramic Capacitors|FieldNameOnly=Library Ref|FieldType=1|ParameterName=[Library Ref]|VisibleOnAdd=False|AddMode=0|RemoveMode=0|UpdateMode=0
+[FieldMap3]
+Options=FieldName=Ceramic Capacitors.Library Path|TableNameOnly=Ceramic Capacitors|FieldNameOnly=Library Path|FieldType=1|ParameterName=[Library Path]|VisibleOnAdd=False|AddMode=0|RemoveMode=0|UpdateMode=0
+[FieldMap4]
+Options=FieldName=Ceramic Capacitors.Footprint Ref|TableNameOnly=Ceramic Capacitors|FieldNameOnly=Footprint Ref|FieldType=1|ParameterName=[Footprint Ref]|VisibleOnAdd=False|AddMode=0|RemoveMode=0|UpdateMode=0
+[FieldMap5]
+Options=FieldName=Ceramic Capacitors.Footprint Path|TableNameOnly=Ceramic Capacitors|FieldNameOnly=Footprint Path|FieldType=1|ParameterName=[Footprint Path]|VisibleOnAdd=False|AddMode=0|RemoveMode=0|UpdateMode=0
+[FieldMap6]
+Options=FieldName=Fixed Resistors.IPN|TableNameOnly=Fixed Resistors|FieldNameOnly=IPN|FieldType=0|ParameterName=IPN|VisibleOnAdd=False|AddMode=0|RemoveMode=0|UpdateMode=0
+[FieldMap7]
+Options=FieldName=Fixed Resistors.Library Ref|TableNameOnly=Fixed Resistors|FieldNameOnly=Library Ref|FieldType=1|ParameterName=[Library Ref]|VisibleOnAdd=False|AddMode=0|RemoveMode=0|UpdateMode=0
+[FieldMap8]
+Options=FieldName=Fixed Resistors.Library Path|TableNameOnly=Fixed Resistors|FieldNameOnly=Library Path|FieldType=1|ParameterName=[Library Path]|VisibleOnAdd=False|AddMode=0|RemoveMode=0|UpdateMode=0
+[FieldMap9]
+Options=FieldName=Fixed Resistors.Footprint Ref|TableNameOnly=Fixed Resistors|FieldNameOnly=Footprint Ref|FieldType=1|ParameterName=[Footprint Ref]|VisibleOnAdd=False|AddMode=0|RemoveMode=0|UpdateMode=0
+[FieldMap10]
+Options=FieldName=Fixed Resistors.Footprint Path|TableNameOnly=Fixed Resistors|FieldNameOnly=Footprint Path|FieldType=1|ParameterName=[Footprint Path]|VisibleOnAdd=False|AddMode=0|RemoveMode=0|UpdateMode=0

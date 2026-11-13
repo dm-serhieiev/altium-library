@@ -1,5 +1,6 @@
 """Logical export validation; no SQL types, storage limits or database access."""
 
+import re
 from typing import Mapping
 
 from .models import ColumnDefinition, ModelKind, ModelRef, Parameter, ParameterTemplate, Part, TECHNICAL_COLUMNS
@@ -15,6 +16,11 @@ class SchemaError(ExportValidationError):
 
 class ModelReferenceError(ExportValidationError):
     """An Altium model reference violates the library naming contract."""
+
+
+def validate_part_pk(pk: int, context: str) -> None:
+    if type(pk) is not int or pk <= 0:
+        raise ExportValidationError(f"{context}: Part.pk must be a positive integer")
 
 
 def validate_column_name(name: str) -> None:
@@ -99,3 +105,5 @@ def validate_row(
         value = row[column.name]
         if value is None or not value.strip():
             raise ExportValidationError(f"{context}: required technical column {column.name!r} is empty")
+    if re.fullmatch(r"[1-9][0-9]*", row["InvenTree PK"]) is None:
+        raise ExportValidationError(f"{context}: InvenTree PK must be a positive integer in canonical decimal text")

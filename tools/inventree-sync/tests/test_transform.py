@@ -63,7 +63,7 @@ def test_complete_rows_and_source_values(export_dataset, library_layout):
         "IPN": "RES-10K-1%-0603",
         "Library Ref": "Resistor", "Library Path": r"..\symbols\Passives.SchLib",
         "Footprint Ref": "RES_0603_H0.55", "Footprint Path": r"..\footprints\Resistors.PcbLib",
-        "Value": "10 kΩ", "Package": "0603", "Power Rating": None,
+        "InvenTree PK": "20", "Value": "10 kΩ", "Package": "0603", "Power Rating": None,
     }
     assert second["Package"] is None and second["Power Rating"] == "0.125 W"
     assert second["Library Ref"] == "Resistor"
@@ -308,3 +308,20 @@ def test_unrepresentable_relative_path_is_not_replaced_with_absolute(library_lay
     monkeypatch.setattr("inventree_sync.transform.os.path.relpath", different_drives)
     with pytest.raises(ExportValidationError, match="different drives/shares"):
         resolve_model_path(parse_model_ref("Passives:Resistor", "symbol"), library_layout)
+
+
+def test_part_pk_is_generated_directly_before_dynamic_parameters(export_dataset, library_layout):
+    result = prepare_tables(export_dataset, library_layout)
+    table = result.tables[0]
+    assert [c.name for c in table.columns[:6]] == ["IPN", "Library Ref", "Library Path", "Footprint Ref", "Footprint Path", "InvenTree PK"]
+    assert [row["InvenTree PK"] for row in table.rows] == ["20", "21"]
+    assert table.columns[5].template_pk is None
+    assert "Comment" not in table.rows[0]
+
+
+@pytest.mark.parametrize("pk", [0, -1, True, "20", 1.5, None])
+def test_invalid_source_part_pk_fails_export(export_dataset, library_layout, pk):
+    part = replace(export_dataset.parts[20], pk=pk)
+    dataset = replace(export_dataset, groups={2: (part, export_dataset.parts[21])})
+    with pytest.raises(ExportValidationError, match="Part.pk must be a positive integer"):
+        prepare_tables(dataset, library_layout)

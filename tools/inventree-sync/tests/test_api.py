@@ -27,7 +27,7 @@ def transport(monkeypatch, runtime_token):
     monkeypatch.setattr(requests, "Session", Mock(return_value=session))
     sleep = Mock()
     monkeypatch.setattr("inventree_sync.api.time.sleep", sleep)
-    with InvenTreeClient(InvenTreeSettings("https://inventree.example.com", retries=2)) as client:
+    with InvenTreeClient(InvenTreeSettings("https://inventree.example.com", auth="token", retries=2)) as client:
         yield client, session, sleep
     session.close.assert_called_once()
 
@@ -186,7 +186,7 @@ def test_deployment_subpath(monkeypatch, runtime_token):
     session = Mock()
     monkeypatch.setattr(requests, "Session", Mock(return_value=session))
     session.get.side_effect = [response({"results": [category(1)], "next": "https://inventree.example.com/tools/api/part/category/?offset=1"}), response({"results": [category(2)], "next": None})]
-    with InvenTreeClient(InvenTreeSettings("https://inventree.example.com/tools/")) as client:
+    with InvenTreeClient(InvenTreeSettings("https://inventree.example.com/tools/", auth="token")) as client:
         assert len(list(client.iter_categories())) == 2
     assert session.get.call_args_list[0].args[0] == "https://inventree.example.com/tools/api/part/category/"
 
@@ -248,4 +248,52 @@ def test_scoped_duplicate_part_pk(transport, fixture_record):
     ]
     with pytest.raises(APIError, match="repeated object pk=20"):
         list(client.iter_parts_with_parameters(1))
+
+
+def test_basic_authentication_is_explicit_and_reused(monkeypatch, runtime_auth, caplog):
+    session = Mock()
+    monkeypatch.setattr(requests, "Session", Mock(return_value=session))
+    session.get.side_effect = [response([category(1)]), response([])]
+    with InvenTreeClient(InvenTreeSettings("http://127.0.0.1:8000"), auth=runtime_auth) as client:
+        assert len(list(client.iter_categories())) == 1
+        assert list(client.iter_parts_with_parameters(1)) == []
+    for call in session.get.call_args_list:
+        assert call.kwargs["auth"] is runtime_auth
+        assert call.kwargs["headers"] == {}
+        assert call.kwargs["verify"] is True and call.kwargs["allow_redirects"] is False
+    assert runtime_auth.password not in caplog.text
+    assert session.trust_env is False
+    assert client._auth is None
+
+
+@pytest.mark.parametrize("username,password", [("", "password"), ("  ", "password"), ("name:colon", "password"), ("user", ""), ("user", None)])
+def test_invalid_basic_credentials_fail_without_exposing_values(username, password):
+    from requests.auth import HTTPBasicAuth
+    from inventree_sync.config import ConfigError
+    with pytest.raises(ConfigError):
+        InvenTreeClient(InvenTreeSettings("http://localhost"), HTTPBasicAuth(username, password))
+
+
+@pytest.mark.parametrize("status,challenge,reason", [(401, "Basic realm=api", "authentication failed"), (403, "", "insufficient permissions"), (401, "Digest realm=api", "unsupported by Basic")])
+def test_basic_authentication_diagnostics(monkeypatch, runtime_auth, status, challenge, reason):
+    session = Mock()
+    monkeypatch.setattr(requests, "Session", Mock(return_value=session))
+    session.get.return_value = response(status=status, headers={"WWW-Authenticate": challenge})
+    with InvenTreeClient(InvenTreeSettings("http://localhost"), runtime_auth) as client:
+        with pytest.raises(APIError, match=reason) as error:
+            list(client.iter_categories())
+    assert runtime_auth.password not in str(error.value)
+    assert "Authorization" not in str(error.value)
+    assert session.get.call_count == 1
+
+
+@pytest.mark.parametrize("exception,reason", [(requests.Timeout, "timed out"), (requests.ConnectionError, "connection or TLS"), (requests.RequestException, "transport failure")])
+def test_basic_transport_errors_never_echo_credentials(monkeypatch, runtime_auth, exception, reason, caplog):
+    session = Mock()
+    monkeypatch.setattr(requests, "Session", Mock(return_value=session))
+    session.get.side_effect = exception(runtime_auth.password)
+    with InvenTreeClient(InvenTreeSettings("http://localhost"), runtime_auth) as client:
+        with pytest.raises(APIError, match=reason) as error:
+            list(client.iter_categories())
+    assert runtime_auth.password not in str(error.value) + caplog.text
 

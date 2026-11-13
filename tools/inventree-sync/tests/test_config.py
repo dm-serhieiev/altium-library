@@ -1,5 +1,6 @@
 from dataclasses import asdict
 from pathlib import Path
+from unittest.mock import Mock
 
 import pytest
 
@@ -26,12 +27,12 @@ def test_config_contains_no_credentials(tmp_path, runtime_token, monkeypatch):
 def test_missing_environment(tmp_path, monkeypatch):
     monkeypatch.delenv("INVENTREE_API_TOKEN", raising=False)
     with pytest.raises(ConfigError, match="environment variable"):
-        load_config(write_config(tmp_path))
+        load_config(write_config(tmp_path, 'auth = "token"'))
 
 
 def test_custom_environment(tmp_path, monkeypatch, runtime_token):
     monkeypatch.setenv("TEST_SYNC_TOKEN", runtime_token)
-    config = load_config(write_config(tmp_path, 'token_env = "TEST_SYNC_TOKEN"'))
+    config = load_config(write_config(tmp_path, 'auth = "token"\ntoken_env = "TEST_SYNC_TOKEN"'))
     assert config.inventree.token_env == "TEST_SYNC_TOKEN"
 
 
@@ -43,7 +44,7 @@ def test_invalid_url(url):
     assert "hidden" not in str(error.value)
 
 
-@pytest.mark.parametrize("settings", [{"auth": "basic"}, {"token_env": ""}, {"token_env": "TOKEN=secret"}, {"retries": True}, {"retries": -1}, {"retries": 1.5}, {"connect_timeout": 0}, {"read_timeout": float("inf")}, {"connect_timeout": float("nan")}, {"read_timeout": "60"}, {"read_timeout": True}])
+@pytest.mark.parametrize("settings", [{"auth": "digest"}, {"token_env": ""}, {"token_env": "TOKEN=secret"}, {"retries": True}, {"retries": -1}, {"retries": 1.5}, {"connect_timeout": 0}, {"read_timeout": float("inf")}, {"connect_timeout": float("nan")}, {"read_timeout": "60"}, {"read_timeout": True}])
 def test_invalid_settings(settings):
     with pytest.raises(ConfigError):
         InvenTreeSettings("https://inventree.example.com", **settings)
@@ -157,4 +158,54 @@ def test_unsupported_output_extensions_preserve_existing_files(export_config, tm
     with pytest.raises(ConfigError, match=r"sync.output.*\.sqlite or \.sqlite3"):
         require_export_settings(config)
     assert {path: path.read_bytes() for path in tmp_path.rglob("*") if path.is_file()} == before
+
+
+def test_default_basic_config_requires_no_environment(tmp_path, monkeypatch):
+    monkeypatch.delenv("INVENTREE_API_TOKEN", raising=False)
+    config = load_config(write_config(tmp_path))
+    assert config.inventree.auth == "basic"
+
+
+@pytest.mark.parametrize("frozen", [False, True])
+def test_configuration_discovery_ignores_cwd_and_extraction_dir(tmp_path, monkeypatch, frozen):
+    import inventree_sync.config as module
+    tool = tmp_path / "repo with spaces" / "tools" / "inventree-sync"
+    tool.mkdir(parents=True)
+    (tool / "config.example.toml").write_text("external", encoding="utf-8")
+    unrelated = tmp_path / "unrelated"
+    unrelated.mkdir()
+    monkeypatch.chdir(unrelated)
+    monkeypatch.setattr(module.sys, "frozen", frozen, raising=False)
+    monkeypatch.setattr(module.sys, "_MEIPASS", str(unrelated), raising=False)
+    monkeypatch.setattr(module.sys, "executable", str(tool / "dist" / "inventree-sync.exe"))
+    monkeypatch.setattr(module, "__file__", str(tool / "src" / "inventree_sync" / "config.py"))
+    assert module.configuration_directory() == tool
+
+
+def test_first_run_preserves_example_paths_and_never_overwrites(tmp_path, monkeypatch):
+    from inventree_sync.config import initialize_config
+    import tomllib
+    example = Path(__file__).parents[1] / "config.example.toml"
+    source = tmp_path / "config.toml"
+    answers = iter(["http://127.0.0.1:8000", ""])
+    monkeypatch.setattr("builtins.input", lambda prompt: next(answers))
+    config = initialize_config(source, example)
+    raw = tomllib.loads(source.read_text(encoding="utf-8"))
+    original = tomllib.loads(example.read_text(encoding="utf-8"))
+    assert raw["sync"] == original["sync"] and raw["libraries"] == original["libraries"]
+    assert config.inventree.base_url == "http://127.0.0.1:8000"
+    assert config.scope.root_category_path == ("Electronic Components",)
+    assert "password" not in raw["inventree"] and "username" not in raw["inventree"]
+    before = source.read_bytes()
+    monkeypatch.setattr("builtins.input", lambda prompt: pytest.fail("Existing config must not prompt or be overwritten"))
+    assert initialize_config(source, example) == config
+    assert source.read_bytes() == before
+
+
+def test_first_run_unavailable_input_is_clear_and_creates_no_config(tmp_path, monkeypatch):
+    from inventree_sync.config import initialize_config
+    monkeypatch.setattr("builtins.input", Mock(side_effect=EOFError))
+    with pytest.raises(ConfigError, match="interactive console"):
+        initialize_config(tmp_path / "config.toml", Path(__file__).parents[1] / "config.example.toml")
+    assert not (tmp_path / "config.toml").exists()
 

@@ -1,0 +1,32 @@
+name: inventree-sync Windows
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - 'tools/inventree-sync/**'
+      - 'sync.cmd'
+      - '.github/workflows/inventree-sync-windows.yml'
+  pull_request:
+    paths:
+      - 'tools/inventree-sync/**'
+      - 'sync.cmd'
+      - '.github/workflows/inventree-sync-windows.yml'
+permissions:
+  contents: read
+jobs:
+  windows-executable:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          architecture: x64
+      - name: Test, build and smoke-test executable
+        shell: powershell
+        run: ./tools/inventree-sync/build.ps1
+      - uses: actions/upload-artifact@v4
+        with:
+          name: inventree-sync-windows
+          path: tools/inventree-sync/dist/inventree-sync-windows.zip
+          if-no-files-found: error

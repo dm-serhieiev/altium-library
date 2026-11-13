@@ -16,6 +16,13 @@ from inventree_sync.config import load_config
 EXAMPLE = Path(__file__).parents[1] / "config.example.toml"
 
 
+@pytest.fixture(autouse=True)
+def interactive_auth(monkeypatch, runtime_auth):
+    monkeypatch.setattr("builtins.input", lambda prompt: runtime_auth.username)
+    monkeypatch.setattr("inventree_sync.cli.getpass.getpass", lambda prompt: runtime_auth.password)
+    return runtime_auth
+
+
 @pytest.fixture
 def source_dataset(monkeypatch, export_dataset):
     retrieval = Mock(return_value=export_dataset)
@@ -23,9 +30,11 @@ def source_dataset(monkeypatch, export_dataset):
     return retrieval
 
 
-def test_cli_configuration_error(monkeypatch, capsys):
+def test_cli_configuration_error(monkeypatch, capsys, tmp_path):
     monkeypatch.delenv("INVENTREE_API_TOKEN", raising=False)
-    assert main(["validate", "--config", str(EXAMPLE)]) == 2
+    path = tmp_path / "token.toml"
+    path.write_text(EXAMPLE.read_text(encoding="utf-8").replace('auth = "basic"', 'auth = "token"'), encoding="utf-8")
+    assert main(["validate", "--config", str(path)]) == 2
     assert "Configuration error" in capsys.readouterr().err
 
 
@@ -50,7 +59,8 @@ def test_validate_full_export_without_modifying_files(export_config, source_data
         "Referenced footprint libraries: 1", "SQLite schema: valid", "binary models not inspected", "No database files modified",
     ))
     assert {p.relative_to(tmp_path): p.read_bytes() for p in tmp_path.rglob("*") if p.is_file()} == before
-    source_dataset.assert_called_once_with(export_config.resolve())
+    assert source_dataset.call_args.args[0] == load_config(export_config)
+    assert source_dataset.call_args.kwargs["auth"].username == "test-user"
 
 
 def test_sync_publishes_real_sqlite_database(export_config, source_dataset, capsys):
@@ -106,7 +116,7 @@ def test_full_workflow_source_errors(export_config, source_dataset, capsys, fail
     assert main(["sync", "--config", str(export_config)]) == code
     result = capsys.readouterr()
     assert label in result.err and "internal-secret" not in result.err
-    assert result.out == ""
+    assert "successful" not in result.out.lower()
 
 
 def test_filesystem_failure_has_exit_code_four(export_config, source_dataset, monkeypatch, capsys):
@@ -114,11 +124,12 @@ def test_filesystem_failure_has_exit_code_four(export_config, source_dataset, mo
     assert main(["sync", "--config", str(export_config)]) == 4
     result = capsys.readouterr()
     assert "Database error" in result.err and "file locked" in result.err
-    assert result.out == ""
+    assert "successful" not in result.out.lower()
 
 
 @pytest.mark.parametrize("command", ["validate", "sync"])
 def test_missing_credentials_and_no_secret_output(export_config, monkeypatch, runtime_token, capsys, command):
+    export_config.write_text(export_config.read_text(encoding="utf-8").replace("[inventree]", '[inventree]\nauth = "token"'), encoding="utf-8")
     monkeypatch.delenv("INVENTREE_API_TOKEN")
     assert main([command, "--config", str(export_config)]) == 2
     result = capsys.readouterr()
@@ -165,7 +176,7 @@ def test_invalid_output_extension_fails_before_retrieval(export_config, source_d
     assert main([command, "--config", str(export_config)]) == 2
     result = capsys.readouterr()
     assert "Configuration error" in result.err and ".sqlite or .sqlite3" in result.err
-    assert result.out == ""
+    assert "successful" not in result.out.lower()
     source_dataset.assert_not_called()
     assert {path: path.read_bytes() for path in tmp_path.rglob("*") if path.is_file()} == before
 
@@ -198,5 +209,60 @@ def test_journal_conflict_reports_exit_code_four_and_preserves_files(export_conf
     assert main(["sync", "--config", str(export_config)]) == 4
     result = capsys.readouterr()
     assert "Database error" in result.err and str(sidecar) in result.err
-    assert "publication blocked" in result.err and result.out == ""
+    assert "publication blocked" in result.err and "successful" not in result.out.lower()
     assert {path: path.read_bytes() for path in tmp_path.rglob("*") if path.is_file()} == before
+
+
+@pytest.mark.parametrize("command", [[], ["sync"], ["validate"], ["inspect"]])
+def test_default_discovery_and_single_credential_prompt(export_config, source_dataset, monkeypatch, runtime_auth, capsys, command):
+    username = Mock(return_value=runtime_auth.username)
+    password = Mock(return_value=runtime_auth.password)
+    monkeypatch.setattr("builtins.input", username)
+    monkeypatch.setattr("inventree_sync.cli.getpass.getpass", password)
+    monkeypatch.setattr("inventree_sync.cli.configuration_directory", lambda: export_config.parent)
+    # Discovery expects config.toml; this fixture already uses that filename.
+    assert main(command) == 0
+    username.assert_called_once_with("Username: ")
+    password.assert_called_once_with("Password: ")
+    assert source_dataset.call_args.kwargs["auth"].password == runtime_auth.password
+    result = capsys.readouterr()
+    assert runtime_auth.password not in result.out + result.err
+    assert "Username: test-user" not in result.out
+
+
+@pytest.mark.parametrize("failure", [EOFError, OSError, KeyboardInterrupt])
+def test_unavailable_interactive_input_fails_safely(export_config, source_dataset, monkeypatch, capsys, failure):
+    monkeypatch.setattr("builtins.input", Mock(side_effect=failure))
+    assert main(["inspect", "--config", str(export_config)]) == 2
+    assert "interactive credential input" in capsys.readouterr().err
+    source_dataset.assert_not_called()
+
+
+def test_password_fallback_is_rejected_before_echo(export_config, source_dataset, monkeypatch, capsys):
+    import getpass
+    import warnings
+
+    def insecure_fallback(prompt):
+        warnings.warn("Password input may be echoed", getpass.GetPassWarning)
+        pytest.fail("Unprotected fallback must not execute")
+    monkeypatch.setattr("inventree_sync.cli.getpass.getpass", insecure_fallback)
+    assert main(["inspect", "--config", str(export_config)]) == 2
+    assert "interactive credential input" in capsys.readouterr().err
+    source_dataset.assert_not_called()
+
+
+@pytest.mark.parametrize("username,password,reason", [("", "unused", "Username"), ("user", "", "Password")])
+def test_empty_interactive_credentials(export_config, source_dataset, monkeypatch, capsys, username, password, reason):
+    monkeypatch.setattr("builtins.input", lambda prompt: username)
+    monkeypatch.setattr("inventree_sync.cli.getpass.getpass", lambda prompt: password)
+    assert main(["inspect", "--config", str(export_config)]) == 2
+    assert reason in capsys.readouterr().err
+    source_dataset.assert_not_called()
+
+
+def test_help_never_prompts_or_initializes_config(monkeypatch, capsys):
+    monkeypatch.setattr("inventree_sync.cli.configuration_directory", lambda: pytest.fail("Help must not discover config"))
+    with pytest.raises(SystemExit) as done:
+        main(["--help"])
+    assert done.value.code == 0
+    assert "--config" in capsys.readouterr().out

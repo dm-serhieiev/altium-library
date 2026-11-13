@@ -34,13 +34,13 @@ def test_complete_database_round_trip(prepared, tmp_path):
         info = connection.execute('PRAGMA table_info("Resistors")').fetchall()
         assert [r[1] for r in info] == [c.name for c in prepared.tables[0].columns]
         assert all(r[2] == "TEXT" for r in info)
-        assert [r[3] for r in info] == [1] * 5 + [0] * 3
-        assert [r[5] for r in info] == [1] + [0] * 7
+        assert [r[3] for r in info] == [1] * 6 + [0] * 3
+        assert [r[5] for r in info] == [1] + [0] * 8
         assert connection.execute('SELECT "Package", typeof("Package"), "Power Rating" FROM "Resistors" ORDER BY "IPN"').fetchall() == [
             ("0603", "text", None), (None, "null", "0.125 W"),
         ]
         with pytest.raises(sqlite3.IntegrityError):
-            connection.execute('INSERT INTO "Resistors" SELECT lower("IPN"), "Library Ref", "Library Path", "Footprint Ref", "Footprint Path", "Value", "Package", "Power Rating" FROM "Resistors" LIMIT 1')
+            connection.execute('INSERT INTO "Resistors" SELECT lower("IPN"), "Library Ref", "Library Path", "Footprint Ref", "Footprint Path", "InvenTree PK", "Value", "Package", "Power Rating" FROM "Resistors" LIMIT 1')
     writer._verify_database(prepared, destination.resolve())
     assert sorted(p.name for p in destination.parent.iterdir()) == [destination.name]
 
@@ -81,7 +81,7 @@ def test_identifier_quoting():
 
 def test_multiple_tables_and_case_insensitive_global_ipns(prepared, tmp_path):
     first = prepared.tables[0]
-    second = replace(first, category_pk=4, name="Connectors", rows=({**first.rows[0], "IPN": "CON-ONE"},))
+    second = replace(first, category_pk=4, name="Connectors", rows=({**first.rows[0], "IPN": "CON-ONE", "InvenTree PK": "99"},))
     snapshot = PreparedTables((first, second))
     destination = tmp_path / "output" / "components.sqlite"
     writer.write_sqlite_database(snapshot, destination)
@@ -308,6 +308,7 @@ def test_schema_limit_is_a_validation_error(prepared):
         limit = connection.getlimit(sqlite3.SQLITE_LIMIT_COLUMN)
     columns = TECHNICAL_COLUMNS + tuple(ColumnDefinition(f"Field {pk}", pk) for pk in range(1, limit))
     row = {column.name: "text" for column in columns}
+    row["InvenTree PK"] = "1"
     with pytest.raises(ExportValidationError, match="SQLite schema/data compatibility"):
         writer.validate_sqlite_tables(one_table(prepared, columns=columns, rows=(row,)))
 
@@ -326,7 +327,7 @@ def test_new_parts_parameters_and_categories_replace_current_snapshot(prepared, 
     table = prepared.tables[0]
     columns = (*table.columns, ColumnDefinition("Comment", 101))
     rows = tuple({**row, "Comment": "explicit InvenTree parameter"} for row in table.rows)
-    added = {**rows[0], "IPN": "RES-NEW-PART"}
+    added = {**rows[0], "IPN": "RES-NEW-PART", "InvenTree PK": "99"}
     updated = replace(table, columns=columns, rows=(*rows, added))
     moved = replace(updated, category_pk=4, name="Connectors", rows=(rows[1],))
     current = PreparedTables((replace(updated, rows=(rows[0], added)), moved))
@@ -461,3 +462,35 @@ def test_dangling_symlink_detection_without_platform_symlink_privileges(tmp_path
     monkeypatch.setattr(Path, "lstat", Mock(return_value=Mock(st_mode=stat.S_IFLNK)))
     with pytest.raises(writer.DatabaseError, match="publication blocked.*components.sqlite-wal"):
         writer._check_destination_state(destination)
+
+
+@pytest.mark.parametrize("value", [None, "", "0", "-1", "01", "+1", "1.0", " 1", "1 ", "\u0661", 1, True])
+def test_inventree_pk_requires_canonical_positive_text(prepared, tmp_path, value):
+    table = prepared.tables[0]
+    snapshot = one_table(prepared, rows=({**table.rows[0], "InvenTree PK": value}, *table.rows[1:]))
+    with pytest.raises(ExportValidationError, match="InvenTree PK"):
+        writer.write_sqlite_database(snapshot, tmp_path / "output.sqlite")
+    assert not (tmp_path / "output.sqlite").exists()
+
+
+@pytest.mark.parametrize("across_tables", [False, True])
+def test_inventree_pk_is_globally_unique(prepared, across_tables):
+    table = prepared.tables[0]
+    duplicate = {**table.rows[0], "IPN": "DIFFERENT-IPN"}
+    if across_tables:
+        snapshot = PreparedTables((table, replace(table, category_pk=4, name="Connectors", rows=(duplicate,))))
+    else:
+        snapshot = one_table(prepared, rows=(*table.rows, duplicate))
+    with pytest.raises(ExportValidationError, match="duplicate InvenTree PK"):
+        writer.validate_sqlite_tables(snapshot)
+
+
+def test_inventree_pk_text_round_trip_and_existing_ipn_primary_key(prepared, tmp_path):
+    destination = tmp_path / "output.sqlite"
+    writer.write_sqlite_database(prepared, destination)
+    with closing(sqlite3.connect(destination)) as connection:
+        assert connection.execute('SELECT "InvenTree PK", typeof("InvenTree PK") FROM "Resistors" ORDER BY "IPN"').fetchall() == [("20", "text"), ("21", "text")]
+        info = {row[1]: row for row in connection.execute('PRAGMA table_info("Resistors")')}
+        assert info["InvenTree PK"][2:6] == ("TEXT", 1, None, 0)
+        assert info["IPN"][5] == 1
+        assert len(connection.execute('PRAGMA index_list("Resistors")').fetchall()) == 1

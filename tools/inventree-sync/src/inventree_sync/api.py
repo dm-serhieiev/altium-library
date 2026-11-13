@@ -9,9 +9,10 @@ from typing import TypeVar
 from urllib.parse import parse_qsl, urlencode, urljoin, urlsplit, urlunsplit
 
 import requests
+from requests.auth import HTTPBasicAuth
 
 from . import adapters
-from .config import InvenTreeSettings, read_token
+from .config import ConfigError, InvenTreeSettings, read_token
 from .models import Category, Parameter, ParameterTemplate, Part, PartWithParameters
 
 logger = logging.getLogger(__name__)
@@ -45,12 +46,28 @@ class InvenTreeClient:
     """Use as a context manager; consume iterators fully before using a dataset.
 
     Supports the modern wire contract in adapters.py, not every InvenTree release.
-    Authentication is read from the environment at request time.
+    Basic credentials are supplied explicitly; token mode is legacy opt-in.
     """
 
-    def __init__(self, settings: InvenTreeSettings):
+    def __init__(self, settings: InvenTreeSettings, auth: HTTPBasicAuth | None = None):
         self.settings = settings
-        read_token(settings)
+        if settings.auth == "basic":
+            if not isinstance(auth, HTTPBasicAuth) or not isinstance(auth.username, str) or not auth.username.strip() or ":" in auth.username:
+                raise ConfigError("Basic Authentication requires a nonempty username without a colon")
+            if not isinstance(auth.password, str) or not auth.password:
+                raise ConfigError("Basic Authentication requires a nonempty password")
+            try:
+                auth.username.encode("latin-1")
+                auth.password.encode("latin-1")
+            except UnicodeError:
+                raise ConfigError("Credentials cannot be encoded by Requests HTTPBasicAuth") from None
+            self._auth = auth
+            self._headers = {}
+        else:
+            if auth is not None:
+                raise ConfigError("Do not supply Basic credentials with token authentication")
+            self._auth = None
+            self._headers = {"Authorization": f"Token {read_token(settings)}"}
         self._api_root = settings.base_url.rstrip("/") + "/api/"
         self._session = requests.Session()
         # Avoid implicit .netrc authentication, cookies and environment TLS overrides.
@@ -64,6 +81,8 @@ class InvenTreeClient:
 
     def close(self) -> None:
         self._session.close()
+        self._auth = None
+        self._headers.clear()
 
     def iter_categories(self) -> Iterator[Category]:
         return self._iterate(adapters.CATEGORIES_ENDPOINT, adapters.category)
@@ -96,7 +115,8 @@ class InvenTreeClient:
             try:
                 response = self._session.get(
                     url,
-                    headers={"Authorization": f"Token {read_token(self.settings)}"},
+                    headers=dict(self._headers),
+                    auth=self._auth,
                     timeout=(self.settings.connect_timeout, self.settings.read_timeout),
                     verify=True,
                     allow_redirects=False,
@@ -109,8 +129,13 @@ class InvenTreeClient:
                 raise APIError(f"GET {endpoint}: HTTP transport failure") from None
             try:
                 status = response.status_code
-                if status in (401, 403):
-                    raise APIError(f"GET {endpoint}: HTTP {status}, authentication/access denied")
+                if status == 401:
+                    challenge = response.headers.get("WWW-Authenticate", "")
+                    if isinstance(challenge, str) and challenge.lower().startswith(("digest ", "negotiate", "bearer ")) and self.settings.auth == "basic":
+                        raise APIError(f"GET {endpoint}: HTTP 401, server requires an authentication method unsupported by Basic mode")
+                    raise APIError(f"GET {endpoint}: HTTP 401, authentication failed. Check your username and password (or legacy token); confirm the server permits the selected authentication method.")
+                if status == 403:
+                    raise APIError(f"GET {endpoint}: HTTP 403, insufficient permissions for this operation")
                 if status in _RETRY_STATUSES and attempt < self.settings.retries:
                     delay = _retry_delay(response.headers.get("Retry-After"), attempt)
                 elif status != 200:

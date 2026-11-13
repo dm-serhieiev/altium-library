@@ -177,7 +177,7 @@ Do not use category parameter assignments or a locally maintained category schem
 
 An empty leaf category produces no SQLite table and does not require schema discovery.
 
-If an ordinary parameter exists on at least one Part in the category, it belongs to the table schema. Parts which do not contain that parameter receive Python `None` (eventually SQL `NULL`) for that column. Dynamic columns remain ordered by ParameterTemplate PK after the five technical columns.
+If an ordinary parameter exists on at least one Part in the category, it belongs to the table schema. Parts which do not contain that parameter receive Python `None` (eventually SQL `NULL`) for that column. Dynamic columns remain ordered by ParameterTemplate PK after the six technical columns: `IPN`, `Library Ref`, `Library Path`, `Footprint Ref`, `Footprint Path`, `InvenTree PK`.
 
 Validate all actual parameter references before excluding these exact template names from the output schema: `KiCad Symbol`, `KiCad Footprint`, `Altium Symbol`, `Altium Footprint`. KiCad values are ignored by Altium transformation. The two Altium parameters are mandatory source-only parameters; resolve them through `PreparedDataset.parameters` and `PreparedDataset.templates`, independently of exported columns. Keep all source parameters and templates in `PreparedDataset`.
 
@@ -194,6 +194,7 @@ Some rules are software contracts rather than InvenTree data and therefore may b
 Examples include:
 
 - `Part.IPN` maps to the database `IPN`;
+- `Part.pk` maps directly to generated `InvenTree PK` as canonical positive decimal text, globally unique across the export; it is not the SQLite primary key;
 - `IPN` is the component identifier used by the generated Altium database;
 - `Part.name` is not an IPN fallback;
 - IPNs are not regenerated from other parameters;
@@ -289,7 +290,7 @@ without unintended numeric conversion or formatting changes.
 
 Use the textual InvenTree parameter representation defined by the architecture.
 
-`PreparedDataset` retains the original source representation. In the transformation layer only, `PreparedTables` formats ordinary parameter values using `Parameter.data` and `ParameterTemplate.units`, never `data_numeric`. Append missing units using the exact metadata spelling and one added space; preserve existing equivalent suffixes (especially `ohm`/`Ω`/`Ω`) without duplication or conversion. Do not format the five technical columns or excluded CAD parameters. Conflicting or ambiguous unit suffixes must raise contextual `ExportValidationError` with Part PK/IPN, template PK/name, original value and configured units; never return partial tables. Supported scalar/suffix recognition and its limits are specified in the architecture document. Missing/empty values remain `None`; whitespace-only optional values remain verbatim even with units.
+`PreparedDataset` retains the original source representation. In the transformation layer only, `PreparedTables` formats ordinary parameter values using `Parameter.data` and `ParameterTemplate.units`, never `data_numeric`. Append missing units using the exact metadata spelling and one added space; preserve existing equivalent suffixes (especially `ohm`/`Ω`/`Ω`) without duplication or conversion. Do not format the six technical columns or excluded CAD parameters. Conflicting or ambiguous unit suffixes must raise contextual `ExportValidationError` with Part PK/IPN, template PK/name, original value and configured units; never return partial tables. Supported scalar/suffix recognition and its limits are specified in the architecture document. Missing/empty values remain `None`; whitespace-only optional values remain verbatim even with units.
 
 Missing optional values should remain missing and ultimately map to SQL `NULL`, not placeholder strings such as:
 
@@ -315,7 +316,9 @@ Never commit:
 - session cookies;
 - other credentials.
 
-Use environment variables or secure interactive input as specified by the architecture.
+The default is interactive HTTP Basic Auth: prompt once per command with `input()` and secure `getpass()`, then pass `HTTPBasicAuth` explicitly through retrieval to the client. Keep credentials in runtime memory only, never in TOML, `.env`, Credential Manager, password arguments, logs or persistent tokens. Abort on unavailable secure input rather than accepting echoed password fallback. Python cannot guarantee immediate string erasure. Legacy `auth="token"` may read its configured environment variable, but Basic mode must not require any token or environment variable. Both HTTP and HTTPS are supported; do not add HTTPS enforcement or disable normal TLS certificate verification. Preserve authenticated redirect refusal.
+
+Default invocation is sync; `--config` is optional. Discover config relative to source or the external executable/repository, never cwd or PyInstaller extraction. First-run setup creates a missing default config exclusively from the external example, asks server/root, and preserves all example filesystem paths. Never overwrite an existing config. Explicit missing --config remains an error. All output/library paths remain TOML-configurable. The root `sync.cmd` uses the one-file Windows executable and stock PowerShell launcher helper; preserve arguments/exit codes, and pause only for an Explorer double-click console. PyInstaller is build-only; generated executables, archives and build environments stay ignored. Windows build/smoke automation belongs under tools/inventree-sync and the workflow; no live production server is used in tests.
 
 Do not log secrets.
 
@@ -368,7 +371,7 @@ Read operations must remain read-only.
 
 The generated `.sqlite` is a build artifact. Use only standard-library `sqlite3`; do not introduce backend selection, an ORM, database credentials or an external database-generation driver.
 
-Build a complete snapshot from `PreparedTables`, never incrementally modify the published database. All columns are `TEXT`; the five technical columns are `NOT NULL`, and `IPN` is `PRIMARY KEY COLLATE NOCASE`. Optional missing values become SQL `NULL`. Preserve prepared strings and units exactly; never reformat them in the writer. Enforce global case-insensitive IPN uniqueness across tables. Direct writer calls must validate manually constructed tables too.
+Build a complete snapshot from `PreparedTables`, never incrementally modify the published database. All columns are `TEXT`; the six technical columns are `NOT NULL`, and `IPN` is `PRIMARY KEY COLLATE NOCASE`. `InvenTree PK` is mandatory canonical positive decimal text, globally unique across tables, with no additional index. It is generated only from `Part.pk`, never from a parameter; an ordinary template of the same name is a column conflict. In Altium map it manually as ordinary `InvenTree PK` -> `InvenTree PK`, without brackets or automated DbLib edits. Optional missing values become SQL `NULL`. Preserve prepared strings and units exactly; never reformat them in the writer. Enforce global case-insensitive IPN uniqueness across tables. Direct writer calls must validate manually constructed tables too.
 
 Create a unique staging file in the destination directory, use a transaction with DELETE rollback journaling and normal synchronization, commit and close it, reopen read-only and verify integrity, exact tables/schema/constraints and every stored value. Close verification before `os.replace`. Never publish an incomplete database. Do not add auxiliary user tables or columns.
 

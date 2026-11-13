@@ -5,11 +5,16 @@ from uuid import uuid4
 
 import pytest
 import requests
+from requests.auth import HTTPBasicAuth
 
 from inventree_sync.categories import build_category_tree, group_parts
 from inventree_sync.models import Category, Parameter, ParameterTemplate, Part
 from inventree_sync.retrieval import PreparedDataset
 from inventree_sync.transform import LibraryLayout
+
+
+def pytest_addoption(parser):
+    parser.addoption("--sync-executable", help="Built Windows executable for opt-in packaging smoke tests")
 
 
 @pytest.fixture(autouse=True)
@@ -25,6 +30,11 @@ def runtime_token(monkeypatch):
     value = uuid4().hex
     monkeypatch.setenv("INVENTREE_API_TOKEN", value)
     return value
+
+
+@pytest.fixture
+def runtime_auth():
+    return HTTPBasicAuth("test-user", uuid4().hex)
 
 
 @pytest.fixture

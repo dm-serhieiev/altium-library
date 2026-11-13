@@ -3,7 +3,7 @@
 from .categories import CategoryError, validate_export_names
 from .models import ColumnDefinition, TableSchema, TECHNICAL_COLUMNS
 from .retrieval import PreparedDataset
-from .validate import SchemaError, validate_columns, validate_parameter_references
+from .validate import SchemaError, validate_columns, validate_parameter_references, validate_part_pk
 
 
 EXCLUDED_EXPORT_PARAMETERS = frozenset({
@@ -34,6 +34,7 @@ def build_table_schemas(dataset: PreparedDataset) -> tuple[TableSchema, ...]:
         template_pks: set[int] = set()
         for part in dataset.groups[category_pk]:
             source = f"{context}, Part pk={part.pk} IPN={part.ipn!r}"
+            validate_part_pk(part.pk, source)
             if part.pk in seen_parts:
                 raise SchemaError(f"{source}: duplicate Part in export groups")
             if part.category_pk != category_pk or dataset.parts.get(part.pk) != part:

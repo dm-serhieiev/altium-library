@@ -166,6 +166,7 @@ def _build_row(
         "Library Path": symbol_path,
         "Footprint Ref": footprint.model_name,
         "Footprint Path": footprint_path,
+        "InvenTree PK": str(part.pk),
     }
     for column in schema.columns:
         if column.template_pk is not None:

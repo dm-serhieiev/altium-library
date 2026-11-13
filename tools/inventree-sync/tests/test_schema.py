@@ -13,8 +13,8 @@ def test_union_includes_second_part_only_parameters(export_dataset):
     assert len(schemas) == 1
     schema = schemas[0]
     assert (schema.category_pk, schema.name, schema.category_path) == (2, "Resistors", "Components / Resistors")
-    assert schema.columns[:5] == TECHNICAL_COLUMNS
-    assert [(c.template_pk, c.name) for c in schema.columns[5:]] == [
+    assert schema.columns[:len(TECHNICAL_COLUMNS)] == TECHNICAL_COLUMNS
+    assert [(c.template_pk, c.name) for c in schema.columns[len(TECHNICAL_COLUMNS):]] == [
         (30, "Value"), (31, "Package"), (35, "Power Rating"),
     ]
 
@@ -70,7 +70,7 @@ def test_invalid_column_name_has_source_context(export_dataset, name):
     assert all(value in str(error.value) for value in ("Category pk=2", "Components / Resistors", "template pk=30", "column name"))
 
 
-@pytest.mark.parametrize("name", ["IPN", "Library Ref", "library path", "Footprint Ref", "FOOTPRINT PATH"])
+@pytest.mark.parametrize("name", ["IPN", "Library Ref", "library path", "Footprint Ref", "FOOTPRINT PATH", "InvenTree PK", "inventree pk"])
 def test_technical_column_collision(export_dataset, name):
     dataset = replace(export_dataset, templates={**export_dataset.templates, 30: ParameterTemplate(30, name)})
     with pytest.raises(SchemaError, match="technical column"):

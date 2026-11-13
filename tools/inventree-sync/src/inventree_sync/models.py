@@ -66,7 +66,7 @@ class ColumnDefinition:
 
 
 TECHNICAL_COLUMNS = tuple(ColumnDefinition(name, None) for name in (
-    "IPN", "Library Ref", "Library Path", "Footprint Ref", "Footprint Path",
+    "IPN", "Library Ref", "Library Path", "Footprint Ref", "Footprint Path", "InvenTree PK",
 ))
 
 

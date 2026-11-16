@@ -15,6 +15,7 @@ from inventree_sync.transform import LibraryLayout
 
 def pytest_addoption(parser):
     parser.addoption("--sync-executable", help="Built Windows executable for opt-in packaging smoke tests")
+    parser.addoption("--odbc-integration", action="store_true", help="Opt-in real SQLite ODBC test using a disposable User DSN")
 
 
 @pytest.fixture(autouse=True)

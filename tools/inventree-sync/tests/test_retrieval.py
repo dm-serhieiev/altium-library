@@ -12,7 +12,7 @@ from inventree_sync.categories import CategoryError
 from inventree_sync.cli import main
 from inventree_sync.retrieval import DatasetError, retrieve_dataset
 
-EXAMPLE = Path(__file__).parents[1] / "config.example.toml"
+EXAMPLE = Path(__file__).parents[2] / "config.example.toml"
 CATEGORIES = [
     {"pk": 1, "name": "Electronic Components", "parent": None},
     {"pk": 2, "name": "Resistors", "parent": 1},
@@ -28,7 +28,9 @@ def response(payload, status=200):
 
 
 @pytest.fixture
-def scoped_transport(monkeypatch, runtime_token, runtime_auth):
+def scoped_transport(monkeypatch, runtime_token, runtime_auth, tmp_path):
+    (tmp_path / "config.toml").write_bytes(EXAMPLE.read_bytes())
+    monkeypatch.setattr("inventree_sync.cli.configuration_directory", lambda: tmp_path)
     monkeypatch.setattr("builtins.input", lambda prompt: runtime_auth.username)
     monkeypatch.setattr("inventree_sync.cli.getpass.getpass", lambda prompt: runtime_auth.password)
     session = Mock()
@@ -193,7 +195,7 @@ def test_missing_nested_data_never_falls_back(scoped_transport, fixture_record, 
 def test_inspect_runs_actual_workflow(scoped_transport, fixture_record, runtime_token, capsys, runtime_auth):
     first, second = two_parts(fixture_record)
     scoped_transport.get.side_effect = [response(CATEGORIES), response([first, second])]
-    assert main(["inspect", "--config", str(EXAMPLE)]) == 0
+    assert main(["inspect"]) == 0
     output = capsys.readouterr()
     assert output.err == ""
     for expected in ("Electronic Components", "PK 1", "Categories in subtree: 3", "Parts retrieved: 2", "Exported leaf categories: 1", "Part parameters: 2", "Distinct ParameterTemplates: 1", "Nested parameter retrieval: used"):
@@ -207,7 +209,7 @@ def test_inspect_runs_actual_workflow(scoped_transport, fixture_record, runtime_
 @pytest.mark.parametrize("status", [401, 403])
 def test_inspect_authentication_failure(scoped_transport, status, capsys, runtime_auth):
     scoped_transport.get.return_value = response(None, status)
-    assert main(["inspect", "--config", str(EXAMPLE)]) == 3
+    assert main(["inspect"]) == 3
     output = capsys.readouterr()
     assert "successful" not in output.out.lower() and str(status) in output.err
     assert scoped_transport.get.call_count == 1
@@ -219,7 +221,7 @@ def test_inspect_pagination_failure(scoped_transport, fixture_record, capsys, ru
         response(CATEGORIES),
         response({"results": [fixture_record("part_with_parameters")], "next": "?offset=1"}),
     ]
-    assert main(["inspect", "--config", str(EXAMPLE)]) == 3
+    assert main(["inspect"]) == 3
     output = capsys.readouterr()
     assert "successful" not in output.out.lower() and "pagination URL" in output.err
     assert scoped_transport.get.call_count == 2
@@ -227,20 +229,20 @@ def test_inspect_pagination_failure(scoped_transport, fixture_record, capsys, ru
 
 def test_inspect_no_parts_fails(scoped_transport, capsys, runtime_auth):
     scoped_transport.get.side_effect = [response(CATEGORIES), response([])]
-    assert main(["inspect", "--config", str(EXAMPLE)]) == 2
+    assert main(["inspect"]) == 2
     assert "no exported Parts" in capsys.readouterr().err
 
 
 def test_inspect_malformed_response_is_error(scoped_transport, fixture_record, capsys, runtime_auth):
     scoped_transport.get.side_effect = [response(CATEGORIES), response([fixture_record("part")])]
-    assert main(["inspect", "--config", str(EXAMPLE)]) == 3
+    assert main(["inspect"]) == 3
     output = capsys.readouterr()
     assert "successful" not in output.out.lower() and "parameters" in output.err
 
 
 def test_inspect_does_not_expose_unexpected_error(scoped_transport, runtime_token, capsys, runtime_auth):
     scoped_transport.get.side_effect = RuntimeError(runtime_token)
-    assert main(["inspect", "--config", str(EXAMPLE)]) == 1
+    assert main(["inspect"]) == 1
     output = capsys.readouterr()
     assert runtime_token not in output.err
     assert "successful" not in output.out.lower()

@@ -1,7 +1,6 @@
 """Configuration contains settings and secret references, never secrets."""
 
 from dataclasses import dataclass
-import json
 import math
 import os
 from pathlib import Path
@@ -142,6 +141,12 @@ def load_config(path: str | Path) -> Config:
     try:
         with source.open("rb") as stream:
             raw = tomllib.load(stream)
+    except FileNotFoundError:
+        raise ConfigError(
+            f"Configuration file not found:\n{source}\n\n"
+            "Create config.toml in the same directory as inventree-sync.exe.\n"
+            "See tools/README.md for instructions."
+        ) from None
     except (OSError, ValueError):
         # Parser errors can include source lines containing an accidentally pasted secret.
         raise ConfigError(f"Cannot read valid TOML configuration: {source}") from None
@@ -184,49 +189,7 @@ def _config_from_dict(raw: dict, source: Path) -> Config:
 
 
 def configuration_directory() -> Path:
-    """Locate external config from source or the frozen executable, never cwd."""
-    if not getattr(sys, "frozen", False):
-        return Path(__file__).resolve().parents[2]
-    executable = Path(sys.executable).resolve()
-    for base in executable.parents:
-        candidate = base / "tools" / "inventree-sync"
-        if (candidate / "config.example.toml").is_file() or (candidate / "config.toml").is_file():
-            return candidate
-    return executable.parent  # Standalone installation: external example beside exe.
-
-
-def initialize_config(path: Path, example: Path) -> Config:
-    """First run only: retain example paths, exclusively create a credential-free TOML."""
-    if path.exists():
-        return load_config(path)
-    try:
-        raw = tomllib.loads(example.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        raise ConfigError(f"First-run setup requires an external config.example.toml: {example}") from None
-    defaults = _config_from_dict(raw, path)
-    try:
-        server = input(f"InvenTree server URL [{defaults.inventree.base_url}]: ") or defaults.inventree.base_url
-        root_default = " / ".join(defaults.scope.root_category_path)
-        root = input(f"Root category path (levels separated by /) [{root_default}]: ")
-    except (EOFError, OSError, KeyboardInterrupt):
-        raise ConfigError("First-run setup requires interactive console input; supply an existing --config file") from None
-    raw["inventree"]["base_url"] = server
-    raw["scope"]["root_category_path"] = [p.strip() for p in root.split("/")] if root else list(defaults.scope.root_category_path)
-    result = _config_from_dict(raw, path)
-    content = "\n\n".join(
-        f"[{section}]\n" + "\n".join(f"{key} = {json.dumps(value, ensure_ascii=False)}" for key, value in values.items())
-        for section, values in raw.items()
-    ) + "\n"
-    created = False
-    try:
-        with path.open("x", encoding="utf-8") as stream:
-            created = True
-            stream.write(content)
-    except FileExistsError:
-        return load_config(path)  # A concurrent first run won; never overwrite it.
-    except OSError:
-        if created:
-            path.unlink(missing_ok=True)
-        raise ConfigError(f"Cannot create first-run configuration: {path}") from None
-    return result
-
+    """One fixed external location; no cwd, ancestor search or bundled fallback."""
+    if getattr(sys, "frozen", False):
+        return Path(sys.executable).resolve().parent
+    return Path(__file__).resolve().parents[3]

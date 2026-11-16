@@ -4,12 +4,20 @@ on:
   push:
     paths:
       - 'tools/inventree-sync/**'
-      - 'sync.cmd'
+      - 'tools/config.example.toml'
+      - 'tools/README.md'
+      - 'tools/setup-odbc.ps1'
+      - 'database/Components.DbLib'
+      - '.gitignore'
       - '.github/workflows/inventree-sync-windows.yml'
   pull_request:
     paths:
       - 'tools/inventree-sync/**'
-      - 'sync.cmd'
+      - 'tools/config.example.toml'
+      - 'tools/README.md'
+      - 'tools/setup-odbc.ps1'
+      - 'database/Components.DbLib'
+      - '.gitignore'
       - '.github/workflows/inventree-sync-windows.yml'
 permissions:
   contents: read
@@ -28,5 +36,5 @@ jobs:
       - uses: actions/upload-artifact@v4
         with:
           name: inventree-sync-windows
-          path: tools/inventree-sync/dist/inventree-sync-windows.zip
+          path: tools/inventree-sync.exe
           if-no-files-found: error

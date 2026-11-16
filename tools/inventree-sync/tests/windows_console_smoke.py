@@ -43,8 +43,8 @@ def main():
     server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
-    example = config.with_name("config.example.toml").read_text(encoding="utf-8")
-    config.write_text(example.replace("https://inventree.example.com", f"http://127.0.0.1:{server.server_port}"), encoding="utf-8")
+    config.write_text(f'[inventree]\nbase_url="http://127.0.0.1:{server.server_port}"\n'
+                      '[scope]\nroot_category_path=["Electronic Components"]\n', encoding="utf-8")
     before = config.read_bytes()
     env = {k: v for k, v in os.environ.items() if not k.upper().startswith("PYTHON") and k.upper() not in {"VIRTUAL_ENV", "INVENTREE_API_TOKEN"}}
     env["PATH"] = str(Path(os.environ["SystemRoot"]) / "System32")

@@ -1,0 +1,19 @@
+# Reference only. Manually copy to config.toml beside inventree-sync.exe.
+# All filesystem paths are relative to this directory, not the working directory.
+[inventree]
+base_url = "https://inventree.example.com"
+auth = "basic"
+connect_timeout = 10
+read_timeout = 60
+retries = 3
+
+[scope]
+root_category_path = ["Electronic Components"]
+
+[sync]
+output = "../database/components.sqlite"
+dblib = "../database/Components.DbLib"
+
+[libraries]
+symbols = "../symbols"
+footprints = "../footprints"

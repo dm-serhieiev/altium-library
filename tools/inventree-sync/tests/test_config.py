@@ -1,6 +1,5 @@
 from dataclasses import asdict
 from pathlib import Path
-from unittest.mock import Mock
 
 import pytest
 
@@ -72,7 +71,7 @@ def test_secret_in_config_rejected(tmp_path, runtime_token):
 
 
 def test_example_config(runtime_token):
-    config = load_config(Path(__file__).parents[1] / "config.example.toml")
+    config = load_config(Path(__file__).parents[2] / "config.example.toml")
     assert config.scope.root_category_path == ("Electronic Components",)
 
 
@@ -85,7 +84,7 @@ def test_missing_sections_and_fields(tmp_path, runtime_token, content):
 
 
 def test_missing_file(tmp_path):
-    with pytest.raises(ConfigError, match="Cannot read"):
+    with pytest.raises(ConfigError, match="Configuration file not found"):
         load_config(tmp_path / "missing.toml")
 
 
@@ -167,45 +166,29 @@ def test_default_basic_config_requires_no_environment(tmp_path, monkeypatch):
 
 
 @pytest.mark.parametrize("frozen", [False, True])
-def test_configuration_discovery_ignores_cwd_and_extraction_dir(tmp_path, monkeypatch, frozen):
+def test_configuration_discovery_ignores_cwd_parents_and_extraction_dir(tmp_path, monkeypatch, frozen):
     import inventree_sync.config as module
-    tool = tmp_path / "repo with spaces" / "tools" / "inventree-sync"
+    tool = tmp_path / "repo with spaces" / "tools"
     tool.mkdir(parents=True)
-    (tool / "config.example.toml").write_text("external", encoding="utf-8")
     unrelated = tmp_path / "unrelated"
     unrelated.mkdir()
+    for directory in (tmp_path, tool.parent, unrelated):
+        (directory / "config.toml").write_text("invalid fallback", encoding="utf-8")
+        (directory / "config.example.toml").write_text("invalid example", encoding="utf-8")
     monkeypatch.chdir(unrelated)
     monkeypatch.setattr(module.sys, "frozen", frozen, raising=False)
     monkeypatch.setattr(module.sys, "_MEIPASS", str(unrelated), raising=False)
-    monkeypatch.setattr(module.sys, "executable", str(tool / "dist" / "inventree-sync.exe"))
-    monkeypatch.setattr(module, "__file__", str(tool / "src" / "inventree_sync" / "config.py"))
+    monkeypatch.setattr(module.sys, "executable", str(tool / "inventree-sync.exe"))
+    monkeypatch.setattr(module, "__file__", str(tool / "inventree-sync" / "src" / "inventree_sync" / "config.py"))
     assert module.configuration_directory() == tool
+    assert not (tool / "config.toml").exists()
 
 
-def test_first_run_preserves_example_paths_and_never_overwrites(tmp_path, monkeypatch):
-    from inventree_sync.config import initialize_config
-    import tomllib
-    example = Path(__file__).parents[1] / "config.example.toml"
-    source = tmp_path / "config.toml"
-    answers = iter(["http://127.0.0.1:8000", ""])
-    monkeypatch.setattr("builtins.input", lambda prompt: next(answers))
-    config = initialize_config(source, example)
-    raw = tomllib.loads(source.read_text(encoding="utf-8"))
-    original = tomllib.loads(example.read_text(encoding="utf-8"))
-    assert raw["sync"] == original["sync"] and raw["libraries"] == original["libraries"]
-    assert config.inventree.base_url == "http://127.0.0.1:8000"
-    assert config.scope.root_category_path == ("Electronic Components",)
-    assert "password" not in raw["inventree"] and "username" not in raw["inventree"]
-    before = source.read_bytes()
-    monkeypatch.setattr("builtins.input", lambda prompt: pytest.fail("Existing config must not prompt or be overwritten"))
-    assert initialize_config(source, example) == config
-    assert source.read_bytes() == before
-
-
-def test_first_run_unavailable_input_is_clear_and_creates_no_config(tmp_path, monkeypatch):
-    from inventree_sync.config import initialize_config
-    monkeypatch.setattr("builtins.input", Mock(side_effect=EOFError))
-    with pytest.raises(ConfigError, match="interactive console"):
-        initialize_config(tmp_path / "config.toml", Path(__file__).parents[1] / "config.example.toml")
-    assert not (tmp_path / "config.toml").exists()
-
+def test_example_paths_target_repository_directories():
+    example = Path(__file__).parents[2] / "config.example.toml"
+    config = load_config(example)
+    root = example.parent.parent
+    assert config.sync.output == root / "database" / "components.sqlite"
+    assert config.sync.dblib == root / "database" / "Components.DbLib"
+    assert config.libraries.symbols == root / "symbols"
+    assert config.libraries.footprints == root / "footprints"

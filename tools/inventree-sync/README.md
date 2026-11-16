@@ -1,64 +1,94 @@
-# inventree-sync
+# inventree-sync: developer guide
 
-One-way InvenTree → prepared Altium tables → SQLite snapshots. SQLite is the only supported database backend. Generation uses Python 3.11+ and its standard-library `sqlite3`; it does not require an ODBC driver. Altium consumes the result through the separately configured SQLite ODBC connection.
+One-way InvenTree -> PreparedDataset -> PreparedTables -> verified SQLite snapshot -> Altium DbLib. Python 3.11+ and standard-library sqlite3 generate the database; ODBC is needed only by Altium. See the [architecture](../../docs/architecture/inventree-sync-design.md) for the complete contracts and [Ukrainian user guide](../README.md) for daily use.
 
-Download the `inventree-sync-windows` workflow artifact, extract its ZIP over the repository root, then run from PowerShell:
+## Layout and configuration
 
-```powershell
-.\sync
-.\sync validate
-.\sync inspect
-.\sync --help
+```text
+database/components.sqlite           # tracked, verified offline snapshot
+tools/
+  inventree-sync.exe                 # tracked, verified Windows executable
+  config.toml                        # local, ignored
+  config.example.toml                # reference only
+  README.md                          # user instructions
+  inventree-sync/
+    README.md
+    pyproject.toml
+    build.ps1
+    .venv/                           # single development/test/build environment
+    build/                           # ignored candidates and diagnostics
+    src/
+      run.py                         # frozen console entry point
+      inventree_sync/
+        __main__.py                  # python -m inventree_sync
+        cli.py                       # orchestration, credentials, summaries
+        console.py                   # Windows console ownership and final pause
+        config.py                    # TOML and fixed external location
+        api.py / adapters.py         # HTTP and supported API response shapes
+        categories.py / retrieval.py # scoped source data, actual parameters
+        models.py / schema.py        # typed models, dynamic schema union
+        transform.py / validate.py   # Altium references, units, validation
+        sqlite.py                    # schema, complete verification, publication
+    tests/                           # fixtures, regressions, Windows smoke tests
 ```
 
-The launcher locates `tools/inventree-sync/dist/inventree-sync.exe` relative to itself, forwards arguments and preserves exit codes. It does not install anything or change the user's environment. Its stock Windows PowerShell helper keeps an Explorer double-click console open after completion; terminal and redirected invocations do not pause. No external Python installation or administrator privileges are needed to use the executable.
+Frozen execution reads only `Path(sys.executable).resolve().parent / "config.toml"`. Source execution resolves `tools/config.toml` from `config.py`'s location. Neither mode searches cwd, parents or the extraction directory. Missing configuration is an error. The reference example is never read by runtime discovery; users create their config manually. Public CLI arguments select only `sync` (default), `validate`, `inspect`, or help. Explicit-path `load_config()` remains an internal Python API for tests.
 
-With no command, the default is `sync`. `--config` is optional and works with any command, for example `.\sync validate --config "C:\Library Settings\config.toml"`. Without it, configuration is found at `tools/inventree-sync/config.toml` relative to the source application or external executable/repository, never the current directory or PyInstaller extraction directory. A standalone executable outside the repository can use external config/example files beside itself.
+All configured paths resolve relative to the TOML directory. `[sync]` output/dblib and `[libraries]` symbols/footprints are required for validate/sync; inspect can use just inventree/scope. Output must use `.sqlite` or `.sqlite3`, differ from config/DbLib, and pass validation before retrieval.
 
-If the default config is missing, first-run setup asks for the server URL and root category (default `Electronic Components`), preserves the filesystem paths from [config.example.toml](config.example.toml), and exclusively creates local `config.toml`. Existing files are never rewritten. An explicit missing `--config` is an error, not a first-run setup request. All paths still resolve relative to the TOML directory; output and DbLib paths are independent, and the DbLib need not exist. Advanced users can edit all paths manually. Old inspection-only configs need `[sync]` and `[libraries]` for full export.
+## Development and tests
 
-New configs use `auth = "basic"` (also the default when omitted). Each command prompts once with `input()` for Username and `getpass()` for a hidden Password, then passes the same `HTTPBasicAuth` object explicitly to every read-only request. Credentials exist only in the running process: no `.env`, TOML, token creation, Credential Manager or password arguments. Python does not guarantee immediate erasure of strings from memory. If hidden input is unavailable, execution fails instead of falling back to echoed password entry.
-
-Both HTTP and HTTPS are supported, including local HTTP; HTTPS retains normal certificate verification and authenticated redirects are not followed. Basic Auth does not encrypt credentials over HTTP. Server policies such as MFA/SSO can refuse Basic Auth; the program reports authentication/permission errors without printing response bodies or Authorization headers. It cannot always distinguish a wrong password from a server policy rejection on HTTP 401. Requests HTTPBasicAuth uses Latin-1 credential encoding; unsupported characters fail clearly without echoing them. See [InvenTree authentication](https://docs.inventree.org/en/stable/api/#authentication).
-
-Legacy `auth = "token"` remains opt-in, using `token_env` (default `INVENTREE_API_TOKEN`). Existing token configs are preserved; change their `auth` manually to `basic` to use interactive login. Basic mode never requires a token. The program does not load `.env` itself.
-
-For `validate` and `sync`, `sync.output` must end in `.sqlite` or `.sqlite3` (case-insensitive). Other extensions, including `.accdb`, `.db`, and extensionless paths, are configuration errors (exit code `2`) before retrieval or output writes. Output must also differ from the configuration and DbLib paths.
+From the repository root, use the same environment for every step:
 
 ```powershell
-# Optional developer workflow (Python 3.11+):
 python -m venv tools/inventree-sync/.venv
-& ./tools/inventree-sync/.venv/Scripts/python.exe -m pip install -e ./tools/inventree-sync
-& ./tools/inventree-sync/.venv/Scripts/python.exe -m inventree_sync
+& ./tools/inventree-sync/.venv/Scripts/python.exe -m pip install -e './tools/inventree-sync[test,build]'
+& ./tools/inventree-sync/.venv/Scripts/python.exe -m inventree_sync --help
+& ./tools/inventree-sync/.venv/Scripts/python.exe -m pytest tools/inventree-sync/tests -p no:cacheprovider
 ```
 
-`inspect` preserves read-only source inspection. `validate` checks the complete export, library-file existence and real SQLite schema/data in memory without creating database output files/directories. First-run setup can create the credential-free configuration before any command. `sync` rebuilds the complete snapshot in a unique staging file, closes it, reopens it read-only, verifies integrity/schema/constraints/every value, then uses `os.replace` to publish it. Progress messages report completed phases only after they succeed. All fields are `TEXT`; `IPN` remains the non-null case-insensitive primary key. The six technical columns are `IPN`, `Library Ref`, `Library Path`, `Footprint Ref`, `Footprint Path`, `InvenTree PK`. Optional parameters support SQL `NULL`. Unit formatting and CAD exclusions occur only during preparation.
+Reuse an existing `.venv`; do not recreate it unnecessarily. Dependencies and extras are pinned in pyproject.toml. No formatter, linter or type-checker is currently configured. Tests use anonymized fixtures, mocked transport, temporary databases and local synthetic HTTP servers, never production credentials/server/Altium/ODBC.
 
-Creation, insertion, commit, verification or replacement failures preserve the old published database. A `<destination>.sync.lock` coordinates only `inventree-sync` writers. Never delete a lock just because it is old: check its PID and confirm no sync to that destination is running before manually removing an abandoned lock. After a crash, remove only confirmed abandoned staging artifacts.
+Default Basic Auth prompts once for Username and hidden Password, explicitly propagating HTTPBasicAuth to retrieval. No credentials are persisted, and insecure echoed getpass fallback is rejected. HTTP and HTTPS remain supported, normal TLS verification is retained, and authenticated redirects are refused. Legacy token auth is opt-in through its configured environment variable. Python cannot guarantee immediate credential-string erasure. No credentials may enter logs or fixtures.
 
-While holding that lock, immediately before replacement, the writer checks `<destination>-wal`, `-shm`, and `-journal` without opening the existing database. Any entry, including an empty file, directory or broken symlink, blocks publication; failure to inspect a path also blocks it. These sidecars can belong to active or interrupted transactions, so replacing only the main database would risk inconsistent state. The command reports the conflicting path with exit code `4`, preserves the destination and external sidecars, and cleans up its own staging file and lock. It never checkpoints, repairs or automatically deletes external journals.
-
-Close Altium and other SQLite consumers before synchronization. The application lock and sidecar checks cannot detect every external reader or prevent a consumer from opening the database after the check; `os.replace` alone does not guarantee safety against arbitrary concurrent applications. Windows replacement-lock errors are still reported. If publication is blocked, close consumers normally and let SQLite complete its transactions and normal journal cleanup before retrying. If sidecars persist, use the owning application's normal SQLite recovery workflow; do not manually delete journals to bypass the check. The tool does not force-close processes.
-
-Open the result in DB Browser for SQLite or SQLiteStudio to inspect tables and data. In Altium, point the previously tested SQLite ODBC connection at `sync.output`, select current component tables, use `IPN` as key and map the four technical model fields. The schematic symbol's Comment string `=Value` uses the ordinary `Value` parameter. The tool does not synthesize `Comment` or edit Altium libraries/DbLib. Verify placement and PCB footprint transfer manually; library-file checks do not inspect binary models.
-
-In Altium DbLib Field Mapping, manually add Database Field Name `InvenTree PK` → Design Parameter `InvenTree PK`, with exactly that spelling and no brackets. This is an ordinary design parameter. It comes directly from `Part.pk` as positive canonical decimal text (`1257` → `"1257"`), is mandatory and globally unique across tables, and has no additional SQLite index. A ParameterTemplate with the same name is a column conflict. IPN remains the database key; existing schematic components are not updated automatically. Place a new component to verify the parameter alongside the existing `Comment =Value` mechanism.
-
-Exit codes: `0` success, `1` unexpected error, `2` configuration/data, `3` API/authentication, `4` database/filesystem/locking/publication. Missing runtime credentials remain configuration errors (`2`).
-
-Install test dependencies and run the complete offline suite:
-
-```powershell
-& ./tools/inventree-sync/.venv/Scripts/python.exe -m pip install -e './tools/inventree-sync[test]'
-& ./tools/inventree-sync/.venv/Scripts/python.exe -m pytest tools/inventree-sync/tests
-```
-
-See the [architecture](../../docs/architecture/inventree-sync-design.md) for source contracts, configuration, unit-recognition limits, publication and recovery details. JSON audit reports and binary model indexing remain future work.
-
-Build the one-file console executable on Windows using Python 3.11+:
+## Windows build and publication
 
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File tools/inventree-sync/build.ps1
+# Optional interpreter for initial environment creation:
+powershell -NoProfile -ExecutionPolicy Bypass -File tools/inventree-sync/build.ps1 -Python 'C:\Python311\python.exe'
 ```
 
-The script creates ignored `.venv-build`, installs test/build extras, runs offline tests, builds `dist/inventree-sync.exe`, and runs Windows smoke tests with Python absent from the executable's runtime PATH. Those tests include real hidden-console `getpass` input against a local synthetic HTTP server, external configuration, and launcher exit codes. It creates `dist/inventree-sync-windows.zip` as a repository overlay containing the executable, launcher/helper and external example; local config, credentials and libraries are excluded. PyInstaller is a build-only dependency. The GitHub Actions Windows workflow runs this script and uploads the ZIP; no executable is committed. Packaging uses `sys.executable` to locate the external frozen application, as described in [PyInstaller runtime information](https://pyinstaller.org/en/stable/runtime-information.html#using-sys-executable-and-sys-argv-0).
+The script resolves paths from PSScriptRoot, creates/reuses `.venv`, verifies Python 3.11+, installs `[test,build]`, and runs the full suite. PyInstaller (build-only) builds `src/run.py` with `--onefile --console` into a unique `build/candidate-*` directory. Real executable smoke tests must pass before `os.replace` publishes `tools/inventree-sync.exe`. Test, dependency, packaging, smoke or replacement failures preserve the previous executable. A running executable may block replacement on Windows: close it normally and rebuild. Only this build's candidate directory is cleaned up.
+
+No distribution subdirectory, archive or launcher is needed. Runtime Python and dependencies are bundled. Source, tests and external configuration/libraries stay outside the executable. To test a separately built candidate without publishing it:
+
+```powershell
+& ./tools/inventree-sync/.venv/Scripts/python.exe -m pytest tools/inventree-sync/tests/test_packaging.py --sync-executable 'C:\Candidate folder\inventree-sync.exe' -p no:cacheprovider
+```
+
+Smoke tests use paths containing spaces and a runtime PATH with no Python. They exercise real hidden getpass, strict configuration location, redirected execution, Explorer-style console ownership, PowerShell launch, CI behavior, success/error exit codes and a synthetic full SQLite sync. PowerShell orchestration fault-injection tests cover new/reused environments and each failure gate; these are distinct from real PyInstaller compilation.
+
+The executable pauses with `Press Enter to close this window...` only when it owns an interactive Windows console. [GetConsoleProcessList](https://learn.microsoft.com/en-us/windows/console/getconsoleprocesslist) identifies attached processes; the onefile parent is allowed only when its image matches the application's executable. Existing terminals, redirected streams, CI and uncertain detection do not pause. Help and argparse errors use the same finalizer. Source/module execution never pauses.
+
+The Windows GitHub Actions workflow uses Python 3.11, runs this script and uploads `tools/inventree-sync.exe` directly as the workflow artifact. It never commits binaries. The previous failed run [43474057233](https://github.com/dm-serhieiev/altium-library/actions/runs/43474057233) had 29 failures caused by the missing committed configuration example; the new tracked example and path tests address that cause without weakening retrieval checks.
+
+## SQLite and tracked snapshot policy
+
+InvenTree remains the source of truth. Only nonempty exported leaf categories become tables, named exactly as in InvenTree. Actual Part parameters drive schemas. Six technical TEXT columns are followed by dynamic columns in template PK order. IPN is the case-insensitive primary key; generated InvenTree PK is globally unique canonical decimal text. CAD source parameters are excluded after validation. Ordinary values preserve textual data with the specified unit formatting. No synthetic Comment is created; the schematic symbol uses `=Value`.
+
+`inspect` reads source data; `validate` exercises the full export in memory. Neither changes the database. Sync writes a complete transaction in a unique staging file, closes it, reopens read-only, verifies integrity/schema/constraints/every value, and closes verification before replacement. It holds an exclusive destination lock and checks all WAL/SHM/journal entries immediately before publication. Existing sidecars or inspection errors block publication. Never delete external journals, force-close consumers, checkpoint/repair their database, or assume os.replace protects arbitrary concurrent readers. Close Altium/viewers before sync. Recover an abandoned sync lock manually only after confirming its owner and all sync processes are stopped.
+
+API/authentication, validation, staging, verification and publication failures preserve the previous database. A sync API failure explicitly reports an existing local snapshot as unchanged and available offline, while returning failure. `database/components.sqlite` is an intentional tracked cache, not a second source of truth. Before manually committing an updated snapshot, close consumers, verify integrity/schema/content and ensure no journal dependencies remain. Other generated databases, sidecars, locks, candidates, environment files and local config remain ignored. The verified `tools/inventree-sync.exe` is also intentionally tracked. No runtime/build step commits or pushes either artifact.
+
+Altium DbLib and binary symbol/footprint libraries are never modified by synchronization. The separate [setup-odbc.ps1](../setup-odbc.ps1) configures the local 64-bit `AltiumComponents` User DSN; the tracked DbLib uses that stable DSN through MSDASQL. Setup reads the standard `database/components.sqlite` path independently of synchronization TOML. See the [user guide](../README.md) for setup and verification. Configure field mappings manually, including ordinary `InvenTree PK` -> `InvenTree PK`. Unit tests and native executable tests do not prove Altium compatibility or the existence of models inside binary libraries. Verify lookup, placement, `Comment =Value`, parameters and PCB footprint transfer manually.
+
+The ordinary test suite includes PowerShell setup tests with mocked Wdac operations. It never configures production DSNs. To additionally exercise an installed SQLite3 x64 ODBC driver against disposable databases and a unique temporary User DSN:
+
+```powershell
+& ./tools/inventree-sync/.venv/Scripts/python.exe -m pytest tools/inventree-sync/tests/test_odbc_setup.py --odbc-integration -p no:cacheprovider
+```
+
+The optional test covers native create/repeat/move/check, rollback on corrupt data, refusal to create missing files and actual write rejection. It cleans up its test DSN. It does not test the Altium UI. Python is used only by the test runner, not by the setup utility.
+
+Exit codes: 0 success; 1 unexpected error; 2 configuration/data/secure input; 3 API/authentication; 4 database/filesystem/locking/publication.

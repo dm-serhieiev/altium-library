@@ -10,7 +10,7 @@ from requests.auth import HTTPBasicAuth
 from .adapters import AdapterError
 from .api import APIError
 from .categories import CategoryError
-from .config import ConfigError, configuration_directory, initialize_config, load_config, require_export_settings
+from .config import ConfigError, configuration_directory, load_config, require_export_settings
 from .retrieval import DatasetError, PreparedDataset, retrieve_dataset
 from .sqlite import DatabaseError, validate_sqlite_tables, write_sqlite_database
 from .transform import LibraryLayout, prepare_tables
@@ -48,15 +48,11 @@ def _prompt_auth() -> HTTPBasicAuth:
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="inventree-sync")
     parser.add_argument("command", nargs="?", choices=("sync", "validate", "inspect"), default="sync", help="sync (default), validate without publication, or inspect source data")
-    parser.add_argument("--config", help="TOML path; defaults to the external application/repository config.toml")
     args = parser.parse_args(argv)
+    config = None
     try:
         print("InvenTree Synchronization\n--------------------------------", flush=True)
-        if args.config is not None:
-            config = load_config(args.config)
-        else:
-            directory = configuration_directory()
-            config = initialize_config(directory / "config.toml", directory / "config.example.toml")
+        config = load_config(configuration_directory() / "config.toml")
         if args.command != "inspect":
             sync, libraries = require_export_settings(config)
         print(f"Server: {config.inventree.base_url}", flush=True)
@@ -99,6 +95,14 @@ def main(argv: list[str] | None = None) -> int:
         return 2
     except (APIError, AdapterError) as exc:
         print(f"API error: {exc}", file=sys.stderr)
+        if args.command == "sync" and config is not None and config.sync is not None:
+            try:
+                existing = config.sync.output.is_file()
+            except OSError:
+                existing = False  # A failed stat must not hide the API failure.
+            if existing:
+                print(f"Existing local database was not modified: {config.sync.output}\n"
+                      "It remains available for offline use; synchronization failed.", file=sys.stderr)
         return 3
     except (CategoryError, DatasetError, ExportValidationError) as exc:
         print(f"Data validation error: {exc}", file=sys.stderr)

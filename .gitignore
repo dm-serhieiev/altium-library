@@ -42,8 +42,7 @@ __pycache__/
 *$py.class
 
 # Virtual environments
-.venv/
-/tools/inventree-sync/.venv-build/
+.venv*/
 venv/
 env/
 
@@ -71,19 +70,21 @@ htmlcov/
 config.toml
 config.local.toml
 
-# Generated SQLite snapshots in the repository output directory
-/database/*.[sS][qQ][lL][iI][tT][eE]
-/database/*.[sS][qQ][lL][iI][tT][eE]-journal
-/database/*.[sS][qQ][lL][iI][tT][eE]-wal
-/database/*.[sS][qQ][lL][iI][tT][eE]-shm
-/database/*.[sS][qQ][lL][iI][tT][eE]3
-/database/*.[sS][qQ][lL][iI][tT][eE]3-journal
-/database/*.[sS][qQ][lL][iI][tT][eE]3-wal
-/database/*.[sS][qQ][lL][iI][tT][eE]3-shm
-# Unique staging files and destination locks owned by inventree-sync
-*.staging.sqlite
-*.staging.sqlite-journal
+# Generated SQLite output; one intentional offline snapshot is versioned.
+*.[sS][qQ][lL][iI][tT][eE]
+*.[sS][qQ][lL][iI][tT][eE]3
+!/database/components.sqlite
+*.[sS][qQ][lL][iI][tT][eE]-journal
+*.[sS][qQ][lL][iI][tT][eE]-wal
+*.[sS][qQ][lL][iI][tT][eE]-shm
+*.[sS][qQ][lL][iI][tT][eE]3-journal
+*.[sS][qQ][lL][iI][tT][eE]3-wal
+*.[sS][qQ][lL][iI][tT][eE]3-shm
 *.sync.lock
+
+# Only the verified Windows application is intentionally versioned.
+*.exe
+!/tools/inventree-sync.exe
 
 # Tokens / secrets
 *.token

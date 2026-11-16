@@ -1,6 +1,6 @@
 # Архітектура inventree-sync: InvenTree → таблиці компонентів → Altium DbLib
 
-Статус: Milestone 1A — основа й API-клієнт; Milestone 1B — scoped retrieval та `inspect`; Milestone 1C — динамічна схема, Altium-перетворення та unit-aware `PreparedTables`; Milestone 1D — SQLite writer і безпечна публікація; Milestone 1D.1 — interactive Basic Auth, короткий CLI, external config/first run, Windows executable/launcher та `InvenTree PK`.
+Статус: Milestone 1A — основа й API-клієнт; Milestone 1B — scoped retrieval та `inspect`; Milestone 1C — динамічна схема, Altium-перетворення та unit-aware `PreparedTables`; Milestone 1D — SQLite writer і безпечна публікація; Milestone 1D.1 — interactive Basic Auth та `InvenTree PK`; наступний structural refactor — прямий Windows executable, фіксований зовнішній config і tracked offline snapshot.
 
 Назва програми та console command — `inventree-sync`, назва Python-пакета — `inventree_sync`. Синхронізація одностороння: InvenTree є джерелом істини, згенерована база — відтворюваним проміжним артефактом для Altium DbLib. Скрипт читає InvenTree і не змінює його категорії або компоненти.
 
@@ -30,16 +30,31 @@ InvenTree є єдиним джерелом істини для дерева ка
 
 ## 2. Структура програми
 
-Пропонована структура всередині наявної папки `tools`:
+Структура реалізації та зовнішніх файлів:
+
+```text
+database/components.sqlite       # tracked перевірений offline snapshot
+tools/
+├── README.md                    # інструкції користувача
+├── inventree-sync.exe           # tracked перевірений executable
+├── config.toml                  # локальний, ignored
+├── config.example.toml          # лише ручний reference
+└── inventree-sync/              # нижче — вміст Python-проєкту
+```
 
 ```text
 tools/inventree-sync/
+├── README.md
 ├── pyproject.toml
-├── config.example.toml
+├── build.ps1
+├── .venv/                       # єдине ignored середовище dev/test/build
+├── build/                       # ignored кандидати й діагностика
+├── src/run.py                   # entry point frozen executable
 ├── src/inventree_sync/
 │   ├── __init__.py
 │   ├── __main__.py        # виклик CLI
 │   ├── cli.py             # inspect, validate, sync та console summaries
+│   ├── console.py         # Windows console ownership і фінальна пауза
 │   ├── config.py          # TOML, env, перевірка конфігурації
 │   ├── api.py             # HTTP, auth, timeout, retry, pagination
 │   ├── adapters.py        # особливості версій REST API
@@ -49,9 +64,7 @@ tools/inventree-sync/
 │   ├── schema.py          # build_table_schemas: union фактичних параметрів → логічні колонки
 │   ├── transform.py       # parse_model_ref, LibraryLayout, prepare_tables
 │   ├── validate.py        # логічна перевірка колонок, посилань і рядків
-│   ├── sqlite.py          # TEXT schema, insert, verify, destination lock, atomic publish
-│   ├── report.py          # майбутній JSON-звіт і маніфест
-│   └── pipeline.py        # майбутня послідовність повного експорту
+│   └── sqlite.py          # TEXT schema, insert, verify, destination lock, atomic publish
 └── tests/
     ├── fixtures/          # знеособлені відповіді підтримуваних API
     ├── test_api.py
@@ -340,7 +353,7 @@ Lock не знімається автоматично за віком або PID
 
 ## 8. Конфігурація, CLI та Altium
 
-Вміст `tools/inventree-sync/config.example.toml`:
+Вміст `tools/config.example.toml` (лише reference для ручного створення конфігурації):
 
 ```toml
 [inventree]
@@ -354,15 +367,15 @@ retries = 3
 root_category_path = ["Electronic Components"]
 
 [sync]
-output = "../../database/components.sqlite"
-dblib = "../../database/Components.DbLib"
+output = "../database/components.sqlite"
+dblib = "../database/Components.DbLib"
 
 [libraries]
-symbols = "../../symbols"
-footprints = "../../footprints"
+symbols = "../symbols"
+footprints = "../footprints"
 ```
 
-Усі filesystem paths прив'язуються до директорії TOML через `pathlib.Path.resolve()`, а не до cwd, Python або модуля CLI. Абсолютні шляхи також допустимі. SQLite output незалежний від DbLib; DbLib і його папка можуть ще не існувати. Для `validate`/`sync` дозволені лише розширення `.sqlite` та `.sqlite3` без урахування регістру (`.SQLITE`/`.SQLITE3` також допустимі). `.accdb`, `.db`, Altium extensions, `.txt` і шляхи без розширення відхиляються через `ConfigError` / CLI `2` до retrieval або output writes. Output також не може збігатися з конфігурацією/DbLib. `sync` за потреби створює output directory, `validate` її не створює. `inspect` не вимагає export settings. Git ignore rules охоплюють обидва розширення та sidecars у `database/`, staging і sync locks, зберігаючи можливість версіонувати SQL fixtures/source files.
+Усі filesystem paths прив'язуються до директорії TOML через `pathlib.Path.resolve()`, а не до cwd, Python або модуля CLI. Абсолютні шляхи також допустимі. SQLite output незалежний від DbLib; DbLib і його папка можуть ще не існувати. Для `validate`/`sync` дозволені лише розширення `.sqlite` та `.sqlite3` без урахування регістру (`.SQLITE`/`.SQLITE3` також допустимі). `.accdb`, `.db`, Altium extensions, `.txt` і шляхи без розширення відхиляються через `ConfigError` / CLI `2` до retrieval або output writes. Output також не може збігатися з конфігурацією/DbLib. `sync` за потреби створює output directory, `validate` її не створює. `inspect` не вимагає export settings. Git ignore rules охоплюють обидва розширення, sidecars, staging і sync locks; виняток — tracked `database/components.sqlite`. SQL fixtures/source files залишаються trackable.
 
 `inspect` приймає попередню конфігурацію лише з `[inventree]` і `[scope]`. Для `validate`/`sync` обов'язкові обидві секції `[sync]` та `[libraries]` з усіма ключами. Невідомі sections/settings відхиляються без виведення їхніх значень. Немає backend selector, driver, DSN, database credentials або category/parameter/unit profiles у конфігурації. SQLite ODBC connection налаштовується окремо у споживача.
 
@@ -373,27 +386,29 @@ if (-not (Test-Path -LiteralPath ./tools/inventree-sync/.venv)) {
     python -m venv tools/inventree-sync/.venv
 }
 & ./tools/inventree-sync/.venv/Scripts/python.exe -m pip install -e ./tools/inventree-sync
-if (-not (Test-Path -LiteralPath ./tools/inventree-sync/config.toml)) {
-    Copy-Item ./tools/inventree-sync/config.example.toml ./tools/inventree-sync/config.toml
+if (-not (Test-Path -LiteralPath ./tools/config.toml)) {
+    Copy-Item ./tools/config.example.toml ./tools/config.toml
 }
-& ./tools/inventree-sync/.venv/Scripts/inventree-sync.exe inspect --config ./tools/inventree-sync/config.toml
-& ./tools/inventree-sync/.venv/Scripts/inventree-sync.exe validate --config ./tools/inventree-sync/config.toml
-& ./tools/inventree-sync/.venv/Scripts/inventree-sync.exe sync --config ./tools/inventree-sync/config.toml
+& ./tools/inventree-sync/.venv/Scripts/python.exe -m inventree_sync inspect
+& ./tools/inventree-sync/.venv/Scripts/python.exe -m inventree_sync validate
+& ./tools/inventree-sync/.venv/Scripts/python.exe -m inventree_sync sync
 ```
 
 У локальному TOML вказати server URL без `/api/` і scope path. Для старого config додати `[sync]`/`[libraries]` за прикладом, не перезаписуючи локальні settings; для interactive login змінити старе `auth="token"` на `basic`. Basic credentials запитуються один раз на команду й не зберігаються. `.env` не завантажується програмою; legacy token mode потребує свого env лише коли явно вибраний.
 
-### 8.0. Milestone 1D.1 — короткий CLI, first run і Windows packaging
+### 8.0. Фіксована конфігурація та прямий Windows executable
 
-`inventree-sync` без команди дорівнює `inventree-sync sync`. `sync`, `validate`, `inspect`, `--help` залишаються доступними; `--config` необов'язковий до чи після команди. CLI показує server, запитує credentials і виводить progress retrieval, preparation та SQLite validation/generation/publication; OK/success з'являється лише після завершення відповідної операції. Sync не виконує зайву повну validation перед writer, який уже її робить.
+`inventree-sync` без команди дорівнює `inventree-sync sync`. Доступні `sync`, `validate`, `inspect`, `--help`; публічний CLI не має override шляху конфігурації. CLI показує server, запитує credentials і виводить progress retrieval, preparation та SQLite validation/generation/publication; OK/success з'являється лише після завершення відповідної операції. Sync не виконує зайву повну validation перед writer, який уже її робить.
 
-Без `--config` source mode використовує зовнішній `tools/inventree-sync/config.toml` від location модуля, frozen mode — від location зовнішнього exe (`sys.executable`) та repository layout, ніколи cwd чи `_MEIPASS`. Standalone exe поза repo може використовувати config/example поруч із собою. Якщо default config відсутній, `initialize_config` читає external `config.example.toml`, запитує server URL і root path (типово `Electronic Components`), зберігає всі example filesystem paths та створює TOML через exclusive `open("x")`. Існуючий config ніколи не переписується. Explicit missing `--config` є помилкою, не setup request. First-run setup може створити config навіть перед validate/inspect, але database outputs ці команди не створюють. Credentials запитуються після setup і до config не потрапляють.
+Frozen mode читає тільки `Path(sys.executable).resolve().parent / "config.toml"`. Source mode читає `tools/config.toml`, визначаючи директорію від розташування `config.py`. Немає пошуку в батьківських каталогах, cwd, старому project directory або `_MEIPASS`. При відсутності config програма завершується з кодом `2`, показує точний шлях і підказку створити файл поруч із executable за `tools/README.md`. Runtime не читає й не шукає `config.example.toml`, не створює конфігурацію та не запитує setup. Internal API `load_config(path)` зберігається для тестів.
 
-Для звичайного Windows користувача розпакувати workflow artifact ZIP поверх repository root й виконати ` .\sync`, `.\sync validate`, `.\sync inspect`, `.\sync --help`. `sync.cmd` знаходить `tools/inventree-sync/dist/inventree-sync.exe` відносно себе, передає arguments через stock PowerShell `launch.ps1` і зберігає exit code. Helper не змінює environment користувача й нічого не інсталює. Для Explorer double-click нової console він лишає вікно відкритим; redirected/automated та existing-terminal invocations не мають зайвої паузи. Detection використовує console process list і parent `cmd /c`; якщо detection недоступний, helper не блокує automation.
+Windows користувач запускає tracked `tools/inventree-sync.exe` без інсталяції Python або launcher. Приклади з repository root: `.\tools\inventree-sync.exe`, `.\tools\inventree-sync.exe validate`, `.\tools\inventree-sync.exe inspect`, `.\tools\inventree-sync.exe --help`. Із Explorer double-click власної інтерактивної консолі програма після успіху, помилки, help або argparse error чекає `Press Enter to close this window...`, зберігаючи exit code. `console.py` перевіряє streams, CI environment та [GetConsoleProcessList](https://learn.microsoft.com/en-us/windows/console/getconsoleprocesslist). Два процеси PyInstaller onefile допускаються тільки коли parent image збігається з executable. Наявність shell/інших процесів означає чужу консоль. Existing terminal, redirected streams, CI та невизначена detection не отримують паузи. Source execution не робить паузи.
 
-Build: `powershell -NoProfile -ExecutionPolicy Bypass -File tools/inventree-sync/build.ps1` на Windows із Python 3.11+. Script створює ignored `.venv-build`, інсталює `[test,build]`, запускає offline tests, PyInstaller `--onefile --console`, потім Windows smoke tests через `--sync-executable`. Output — `tools/inventree-sync/dist/inventree-sync.exe` та ZIP `inventree-sync-windows.zip`. У ZIP тільки maintained launcher/helper/example/README і generated exe, не local config, credentials чи libraries. PyInstaller — build-only dependency, Python runtime/dependencies bundled. Config, `.DbLib`, `.SchLib`, `.PcbLib` залишаються зовнішніми й TOML-configurable. Windows workflow будує ZIP й завантажує workflow artifact; generated executables не комітяться. [PyInstaller external executable location](https://pyinstaller.org/en/stable/runtime-information.html#using-sys-executable-and-sys-argv-0).
+Build: `powershell -NoProfile -ExecutionPolicy Bypass -File tools/inventree-sync/build.ps1` на Windows із Python 3.11+. Script визначає paths від PSScriptRoot, створює або повторно використовує єдину ignored `.venv` для dev/test/build, перевіряє версію, інсталює `[test,build]`, запускає повний набір тестів. PyInstaller `--onefile --console` пакує `src/run.py` в унікальний `build/candidate-*`; Windows smoke tests через `--sync-executable` перевіряють цей кандидат до заміни tracked `tools/inventree-sync.exe` через `os.replace`. Помилки tests/build/smoke/replacement залишають попередній executable цілим. При Windows file lock завершити власний запущений inventree-sync звичайним способом і повторити build. Cleanup видаляє тільки каталог цього кандидата. Постійний distribution directory й archive не генеруються. PyInstaller — build-only dependency; runtime Python/dependencies bundled. Config і Altium libraries залишаються зовнішніми. Windows workflow використовує Python 3.11, виконує build script і завантажує final executable безпосередньо як artifact; автоматичних комітів немає.
 
-Smoke tests запускають exe з unrelated cwd і без Python у runtime PATH, перевіряють help, external config/first run, launcher arguments/exit codes та real secure getpass через hidden Windows console. API — тільки локальний synthetic HTTP fixture, не production InvenTree. Developer workflow лишається `python -m inventree_sync` після editable installation.
+Smoke tests запускають exe з unrelated cwd, paths із пробілами й без Python у runtime PATH; перевіряють help, єдину config location, відсутність setup/fallback, exit codes, real secure getpass та власну/PowerShell/CI console. Для native pause test HTTP gate підтверджує, що ownership detection завершилася до приєднання observer. Success/error сценарії використовують лише локальний synthetic HTTP server. Окремі fault-injection тести build script перевіряють створення/повторне використання environment та збереження executable на кожній помилці; це не заміна реальної PyInstaller збірки. Developer workflow — `python -m inventree_sync` після editable installation.
+
+`database/components.sqlite` — навмисно tracked перевірений offline snapshot, не друге джерело істини. Перед ручним Git-комітом оновлення перевірити integrity, component schema/content та відсутність залежності від WAL/journal після нормального закриття споживачів. Інші згенеровані SQLite files, sidecars, staging, locks, local config і build artifacts ignored; SQL fixtures лишаються trackable. Невдалий sync зберігає попередні database bytes. При API failure команда sync повідомляє про незмінену локальну базу й можливість offline use тільки якщо файл існує; повертає failure, не synchronization success. Жоден runtime/build крок не виконує Git commit/push.
 
 - `inspect`: тільки попереднє scoped retrieval та структурна перевірка, summary root/category/Parts/parameter/template counts. Не виконує Altium-перетворення або SQLite generation.
 - `validate`: завантаження повної конфігурації, незмінний retrieval API, `prepare_tables`, library-file existence/model-ref checks та реальна in-memory SQLite schema/insertion/verification. Summary містить root, table/component/library counts, SQLite/reference status. Немає filesystem output, lock або published database changes. Binary models не перевіряються.
@@ -405,9 +420,45 @@ Smoke tests запускають exe з unrelated cwd і без Python у runtim
 
 Після успішного sync відкрити `components.sqlite` або налаштований `.sqlite3` файл у DB Browser for SQLite або SQLiteStudio. Перевірити список компонентних таблиць, структуру TEXT полів та Browse Data; для стабільного читання використовувати `SELECT ... ORDER BY "IPN"`. Не зберігати ручні виправлення як джерело даних: наступний snapshot їх замінить. Перед наступним sync закрити viewer, Altium та інших SQLite consumers, щоб вони завершили транзакції й нормальне journal cleanup.
 
-У Altium повторно використати SQLite ODBC driver/DSN або connection string, з яким користувач уже перевірив sample DbLib; шлях бази змінити на абсолютний шлях `sync.output`. Драйвер має відповідати розрядності Altium. У Database Library вибрати це connection, увімкнути поточні непорожні таблиці й призначити `IPN` ключем. Налаштувати наведений у розділі 6 mapping `Library Ref`, `Library Path`, `Footprint Ref`, `Footprint Path`; квадратні дужки у mapping позначають спеціальні цілі Altium, не SQL quoting і не частину database column names.
+Tracked `database/Components.DbLib` використовує стабільний User DSN `AltiumComponents` через MSDASQL. Локальний абсолютний шлях до стандартного `database/components.sqlite` налаштовує окремий `tools/setup-odbc.ps1` (розділ 8.2); він не читає sync TOML. Драйвер — 64-бітний SQLite3 ODBC для відповідної розрядності Altium. У Database Library виконати Connect, увімкнути поточні непорожні таблиці й призначити `IPN` ключем. Налаштувати наведений у розділі 6 mapping `Library Ref`, `Library Path`, `Footprint Ref`, `Footprint Path`; квадратні дужки у mapping позначають спеціальні цілі Altium, не SQL quoting і не частину database column names.
 
 `Value` залишити звичайним database parameter; Comment string символу `=Value` налаштовується вручну у Altium, якщо ще не заданий. Не створювати synthetic database `Comment`. Явний InvenTree `Comment` залишається звичайним параметром. Перевірити пошук IPN, placement символу, Comment і передачу footprint на PCB. Після перейменування категорії оновити table mapping DbLib вручну. Скрипт не створює і не редагує DbLib, libraries або binary models.
+
+### 8.2. Незалежне локальне налаштування ODBC
+
+`tools/setup-odbc.ps1` — standalone Windows PowerShell 5.1 script для Windows 10/11. Це не частина sync pipeline: `inventree-sync.exe` оновлює SQLite, setup налаштовує Windows ODBC. Немає залежності від Python, InvenTree, мережі, сторонніх PowerShell modules або compiled helper. Setup не завантажує/інсталює драйвери та не змінює database contents чи Altium files.
+
+Єдина одноразова repository-зміна в DbLib — рядок нижче, зі збереженням решти байтів, CRLF, таблиць і mappings:
+
+```ini
+ConnectionString=Provider=MSDASQL.1;Persist Security Info=False;Extended Properties="DSN=AltiumComponents;"
+```
+
+Абсолютного database path і Driver name у цьому рядку немає. Runtime setup не переписує DbLib; локальний шлях зберігається тільки у Windows DSN. Одне ім'я DSN у профілі Windows відповідає одному активному checkout.
+
+Запуск із repository root:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\tools\setup-odbc.ps1
+powershell -NoProfile -ExecutionPolicy Bypass -File .\tools\setup-odbc.ps1 -CheckOnly
+```
+
+Алгоритм:
+
+1. Перевірити 64-бітний Windows PowerShell 5.1 та завантажити вбудований Wdac. Для 32-бітного host повернути помилку з інструкцією запуску через Sysnative, не змінюючи DSN.
+2. Визначити `../database/components.sqlite` від `$PSScriptRoot`, незалежно від cwd та sync TOML. Перевірити regular file, SQLite signature, page size/file length. Відсутню чи пошкоджену базу не створювати й не ремонтувати. Пробіли та Unicode підтримуються.
+3. Тримати read-only file handle з `FileShare.Read` до завершення перевірки; він забороняє паралельне відкриття для запису/заміни. Перевірити відсутність WAL/SHM/journal entries, включно з помилкою доступу до sidecar; при конфлікті закрити споживачів і дати SQLite штатно завершити recovery/cleanup. Нічого не видаляти.
+4. Через `Get-OdbcDriver` перевірити точний 64-бітний запис `SQLite3 ODBC Driver`, показуючи лише SQLite-related names/platforms. Опційний `-DriverName` допускає точну зареєстровану назву сумісного `sqlite3odbc.dll`, без wildcard або заміни іншою реалізацією. Відсутній driver означає помилку й інструкцію окремо встановити x64 driver.
+5. Через `Get-OdbcDsn` перевірити `AltiumComponents` у всіх scopes/platforms. Лише MI_RESULT_NOT_FOUND означає відсутність; permission/CIM errors не ігноруються. Same-name System DSN, інший driver або 32-bit-only DSN — conflict без зміни. Windows має спільний User DSN namespace, тому matching 32-bit view поряд із тим самим 64-bit User DSN не є окремим conflict.
+6. Якщо DSN відсутній, `Add-OdbcDsn -DsnType User -Platform '64-bit'` задає `Database=<absolute path>` і `NoCreat=1`. Для compatible DSN зі старим path `Set-OdbcDsn` змінює тільки `Database`; решта settings зберігаються. Equivalent paths (case, slash, dot segments) не змінюються. `-CheckOnly` при відсутності/іншому path повертає помилку, не викликаючи mutations. Конфлікти розв'язуються користувачем в ODBC Data Sources; `-Force` немає.
+7. Повторно прочитати DSN та перевірити driver/platform/path. Виконати read-only ODBC test через `System.Data.Odbc`: `SELECT name FROM sqlite_master LIMIT 1` та `PRAGMA database_list` для підтвердження фактичного main file. Усі connection/command/reader/file handles закриваються.
+8. Якщо configuration/read-back/connection test не вдався після mutation, відновити попередній Database attribute (або його відсутність) чи прибрати щойно створений DSN, якщо ownership зрозумілий. Перевірити rollback read-back. При конфлікті/помилці rollback повідомити `Rollback incomplete`, зберігши початкову помилку. Не видаляти й не переписувати unrelated DSNs.
+
+Driver-specific safety: ця реалізація SQLite3 ODBC ігнорує generic `SQL_ATTR_ACCESS_MODE`; verification connection використовує еквівалентний `file:` URI з `mode=ro&immutable=1` і `NoCreat=1`. Plain absolute path залишається у DSN; URI override застосовується тільки після перевірки прочитаного path. `immutable` дозволено лише для guarded snapshot без sidecars, щоб перевірка не створила WAL/SHM. Невідома/несумісна реалізація не підміняється автоматично. Nonempty `TraceFile`, `LoadExt`, `AttachAs`, `JournalMode`, `SyncPragma` у наявному DSN — conflict: setup не виконує connection-time side effects. Native-перевірка виявила, що setup interface цього драйвера обрізає path на `;` навіть із quoting; такі paths відхиляються до mutation, без прямого registry workaround.
+
+Основи контракту: [Wdac Add-OdbcDsn](https://learn.microsoft.com/en-us/powershell/module/wdac/add-odbcdsn), [Wdac Set-OdbcDsn](https://learn.microsoft.com/en-us/powershell/module/wdac/set-odbcdsn), [Windows User DSN bitness](https://learn.microsoft.com/en-us/troubleshoot/sql/connect/odbc-tool-displays-32-bit-64-bit), [SQLite URI modes](https://sqlite.org/uri.html), [SQLite ODBC source](https://github.com/softace/sqliteodbc/blob/master/sqlite3odbc.c).
+
+Setup повертає `0` тільки після успішної перевірки, `1` при помилці. Звичайний User DSN setup не потребує адміністратора. Offline unit tests підміняють Wdac calls та connectivity, перевіряючи paths, idempotence, errors, conflicts, rollback і незмінність SQLite/DbLib bytes. `--odbc-integration` — явний opt-in до встановленого driver: тільки disposable databases та унікальний тимчасовий User DSN з cleanup, ніколи production DSN. ODBC-тести не доводять Altium placement або correctness моделей; Connect, IPN lookup, Comment, mappings і PCB transfer перевіряються вручну.
 
 ## 9. Послідовність і контроль якості
 
@@ -432,5 +483,7 @@ Unit-тести не використовують live server, credentials, Alti
 Ціль InvenTree лишається 1.5.6 / API schema 530; retrieval strategy, request count і нормалізація не змінюються. Багатосторінковий REST не гарантує транзакційний source snapshot: для узгодженого production release потрібне вікно без редагувань або server snapshot. Unit-тести не доводять наявність моделей усередині binary libraries або production ODBC/Altium compatibility. Detailed JSON manifest, audit history, binary library indexing та автоматизація DbLib mapping залишаються поза Milestone 1D.
 
 ## 10. Історичне рішення — superseded
+
+Milestone 1D.1 спочатку мав автоматичне налаштування конфігурації при першому запуску, зовнішні launcher scripts і окреме build environment. Structural refactor замінив ці рішення фіксованою зовнішньою конфігурацією, прямим executable з власною console pause та єдиним `.venv`. Поточний контракт описано в розділі 8; попередній deployment flow більше не застосовується.
 
 До Milestone 1C розглядався Microsoft Access із шаблоном порожньої бази; 1C повторно відкрив вибір Access/SQLite. Milestone 1D остаточно обрав SQLite після підтвердженого користувачем ODBC sample test. Попередній Access writer не був реалізований; його інструкції не є чинним планом. Історичні repository artifacts не видаляються як частина цього milestone, але вони не потрібні SQLite pipeline. Active architecture не має альтернативного backend або Access-specific setup.

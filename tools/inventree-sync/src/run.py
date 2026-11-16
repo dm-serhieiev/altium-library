@@ -1,6 +1,6 @@
 """Console entry point for the standalone PyInstaller executable."""
 
-from inventree_sync.cli import main
+from inventree_sync.console import run_cli
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    raise SystemExit(run_cli())

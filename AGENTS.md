@@ -115,6 +115,11 @@ Manual changes made to the generated database are not preserved and must not be 
 
 The Altium `.DbLib` consumes the generated SQLite database through the separately configured SQLite ODBC connection but is not a source of component data for `inventree-sync`. Never modify `.DbLib`, `.SchLib`, or `.PcbLib` files during synchronization. Do not synthesize a `Comment` column from `Value`; the tested schematic symbol Comment uses `=Value`. An explicit ordinary InvenTree `Comment` parameter is exported normally.
 
+The explicitly authorized one-time ODBC setup change makes the tracked
+`database/Components.DbLib` use `DSN=AltiumComponents` through MSDASQL. Preserve
+its other bytes, mappings and settings. Neither runtime synchronization nor
+`tools/setup-odbc.ps1` may rewrite DbLib. See the independent setup rules below.
+
 ---
 
 ## 5. `inventree-sync` architecture
@@ -318,7 +323,11 @@ Never commit:
 
 The default is interactive HTTP Basic Auth: prompt once per command with `input()` and secure `getpass()`, then pass `HTTPBasicAuth` explicitly through retrieval to the client. Keep credentials in runtime memory only, never in TOML, `.env`, Credential Manager, password arguments, logs or persistent tokens. Abort on unavailable secure input rather than accepting echoed password fallback. Python cannot guarantee immediate string erasure. Legacy `auth="token"` may read its configured environment variable, but Basic mode must not require any token or environment variable. Both HTTP and HTTPS are supported; do not add HTTPS enforcement or disable normal TLS certificate verification. Preserve authenticated redirect refusal.
 
-Default invocation is sync; `--config` is optional. Discover config relative to source or the external executable/repository, never cwd or PyInstaller extraction. First-run setup creates a missing default config exclusively from the external example, asks server/root, and preserves all example filesystem paths. Never overwrite an existing config. Explicit missing --config remains an error. All output/library paths remain TOML-configurable. The root `sync.cmd` uses the one-file Windows executable and stock PowerShell launcher helper; preserve arguments/exit codes, and pause only for an Explorer double-click console. PyInstaller is build-only; generated executables, archives and build environments stay ignored. Windows build/smoke automation belongs under tools/inventree-sync and the workflow; no live production server is used in tests.
+Default invocation is sync. The public CLI has no configuration-path override. Frozen execution reads only `Path(sys.executable).resolve().parent / "config.toml"`; source execution reads repository `tools/config.toml` resolved from the module location. Never search cwd, parent directories or PyInstaller extraction. Missing configuration fails clearly and points to `tools/README.md`. Never create configuration, prompt for setup, or read/search `config.example.toml` at runtime; `tools/config.example.toml` is a tracked manual reference only. All output/library paths remain TOML-configurable and relative to its directory. Internal explicit-path loading remains available for tests.
+
+The tracked `tools/inventree-sync.exe` is the single final Windows executable; no launcher is required. `src/run.py` uses isolated `console.py` ownership detection and a final pause for an Explorer-style owned interactive console, including help/errors, preserving exit codes. Existing terminals, redirected input/output and CI must not pause. Account for the PyInstaller onefile parent/child processes; uncertain detection must not block automation.
+
+Use one ignored `tools/inventree-sync/.venv` for development, tests and builds. `build.ps1` resolves paths from PSScriptRoot, checks Python 3.11+, installs test/build extras, runs the full suite, builds a unique candidate under `build/` from `src/run.py`, then runs real executable smoke tests before atomically replacing `tools/inventree-sync.exe`. Failures preserve the previous executable. Clean only this build's candidate artifacts. No permanent distribution folder or archive is generated. PyInstaller remains build-only. Windows CI builds with Python 3.11 and uploads the final executable directly, without committing. No live production server or credentials are used in tests.
 
 Do not log secrets.
 
@@ -541,17 +550,17 @@ Do not force-push.
 
 ## 21. Generated files
 
-Do not commit generated synchronization output unless repository policy explicitly requires it.
+Two intentional tracked artifacts are `database/components.sqlite` (verified offline component snapshot) and `tools/inventree-sync.exe` (verified Windows application). Keep their tracked status. InvenTree remains the source of truth; the cached snapshot is never synchronized back. Verify integrity, expected schema/content and absence of journal dependencies before tracking an updated database. Do not fabricate a sample database when a production snapshot is unavailable. Failed sync must preserve existing database bytes; a sync API failure reports an existing local database as unchanged and available offline while retaining its failure exit code. Never create commits or push automatically.
 
 Examples of files which are normally generated or local include:
 
 ```text
-database/components.sqlite
+database/other.sqlite
 database/components.sqlite3
 *.staging.sqlite
 *.staging.sqlite-journal
 *.sync.lock
-tools/inventree-sync/config.toml
+tools/config.toml
 ```
 
 Do not remove unrelated historical artifacts as part of SQLite implementation or documentation cleanup. SQL fixtures and other intentionally maintained source files must remain trackable.
@@ -604,3 +613,47 @@ When uncertain whether information belongs in repository configuration or should
 > Synchronization behavior and conversion rules belong in the repository.
 
 Do not create a second component database in configuration files.
+
+---
+
+## 25. Independent Windows ODBC setup
+
+`tools/setup-odbc.ps1` is a standalone Windows PowerShell 5.1 utility, separate
+from synchronization and configuration TOML. Resolve only the existing
+`../database/components.sqlite` from PSScriptRoot. Never generate or repair a
+database, edit Altium files, contact InvenTree, install/download drivers, or
+modify registry keys directly. Use built-in Wdac cmdlets. Normal operation is a
+64-bit User DSN and does not require administrator privileges.
+
+The public DSN name is fixed as `AltiumComponents`. Validate the installed
+64-bit `SQLite3 ODBC Driver` (`sqlite3odbc.dll`); an explicit DriverName may
+select a compatible registered alias, never an unrelated implementation.
+Reject a 32-bit PowerShell host with instructions for starting the 64-bit host.
+List only SQLite-related driver names/platforms for diagnostics. Fail on Wdac
+inspection errors rather than treating them as absence.
+
+Create missing User DSNs, change only the database path of compatible existing
+DSNs after a move, and leave equivalent paths unchanged. Reject same-name System
+DSNs, incompatible drivers and 32-bit-only DSNs without modifying them. A matching
+32-bit view of the same compatible User DSN is not a separate conflict (Windows
+shares the User DSN namespace). There is no Force override: conflicting settings
+must be resolved explicitly in ODBC Data Sources. Never modify unrelated DSNs.
+
+Validate the SQLite header and file length, reject journal sidecars, and hold a
+read-only file handle without write/delete sharing throughout setup. Read back
+the configured path before testing it through System.Data.Odbc. This driver
+ignores SQL_ATTR_ACCESS_MODE: verification must instead use its SQLite URI
+support with `mode=ro&immutable=1` and `NoCreat=1`. The immutable assumption is
+limited to the guarded, journal-free snapshot. DSN storage retains the plain
+absolute path; only the verification connection uses the equivalent URI.
+Execute only harmless schema/database-list reads and dispose all resources.
+Reject DSN options that cause connection-time side effects. The driver's setup
+interface truncates semicolon-containing paths; reject these before mutation.
+
+On failed verification, restore the previous database attribute (including its
+absence) or remove a newly created DSN when ownership is clear. Report incomplete
+rollback without hiding the original failure. CheckOnly never changes DSNs.
+Runtime setup never commits or pushes. Ordinary CI tests mock ODBC operations;
+real-driver tests are opt-in, use disposable databases and uniquely named
+temporary User DSNs, and clean up only their own DSNs. Altium placement/mapping
+verification remains manual and must not be claimed from ODBC tests alone.

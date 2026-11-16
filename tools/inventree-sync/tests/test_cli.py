@@ -13,11 +13,12 @@ from inventree_sync.api import APIError
 from inventree_sync.cli import main
 from inventree_sync.config import load_config
 
-EXAMPLE = Path(__file__).parents[1] / "config.example.toml"
+EXAMPLE = Path(__file__).parents[2] / "config.example.toml"
 
 
 @pytest.fixture(autouse=True)
-def interactive_auth(monkeypatch, runtime_auth):
+def interactive_auth(monkeypatch, runtime_auth, export_config):
+    monkeypatch.setattr("inventree_sync.cli.configuration_directory", lambda: export_config.parent)
     monkeypatch.setattr("builtins.input", lambda prompt: runtime_auth.username)
     monkeypatch.setattr("inventree_sync.cli.getpass.getpass", lambda prompt: runtime_auth.password)
     return runtime_auth
@@ -32,9 +33,10 @@ def source_dataset(monkeypatch, export_dataset):
 
 def test_cli_configuration_error(monkeypatch, capsys, tmp_path):
     monkeypatch.delenv("INVENTREE_API_TOKEN", raising=False)
-    path = tmp_path / "token.toml"
+    path = tmp_path / "config.toml"
+    monkeypatch.setattr("inventree_sync.cli.configuration_directory", lambda: tmp_path)
     path.write_text(EXAMPLE.read_text(encoding="utf-8").replace('auth = "basic"', 'auth = "token"'), encoding="utf-8")
-    assert main(["validate", "--config", str(path)]) == 2
+    assert main(["validate"]) == 2
     assert "Configuration error" in capsys.readouterr().err
 
 
@@ -45,26 +47,30 @@ def test_installed_module_entry_point():
 
 
 @pytest.mark.parametrize("existing", [False, True])
-def test_validate_full_export_without_modifying_files(export_config, source_dataset, tmp_path, capsys, existing):
+@pytest.mark.parametrize("command", ["validate", "inspect"])
+def test_read_only_commands_without_modifying_files(export_config, source_dataset, tmp_path, capsys, existing, command):
     output = load_config(export_config).sync.output
     if existing:
         output.parent.mkdir()
         output.write_bytes(b"previous database must remain unchanged")
     before = {p.relative_to(tmp_path): p.read_bytes() for p in tmp_path.rglob("*") if p.is_file()}
-    assert main(["validate", "--config", str(export_config)]) == 0
+    assert main([command]) == 0
     result = capsys.readouterr()
     assert result.err == ""
-    assert all(text in result.out for text in (
-        "Validation successful", "Tables: 1", "Components: 2", "Referenced symbol libraries: 1",
-        "Referenced footprint libraries: 1", "SQLite schema: valid", "binary models not inspected", "No database files modified",
-    ))
+    if command == "validate":
+        assert all(text in result.out for text in (
+            "Validation successful", "Tables: 1", "Components: 2", "Referenced symbol libraries: 1",
+            "Referenced footprint libraries: 1", "SQLite schema: valid", "binary models not inspected", "No database files modified",
+        ))
+    else:
+        assert "Parts retrieved: 2" in result.out
     assert {p.relative_to(tmp_path): p.read_bytes() for p in tmp_path.rglob("*") if p.is_file()} == before
     assert source_dataset.call_args.args[0] == load_config(export_config)
     assert source_dataset.call_args.kwargs["auth"].username == "test-user"
 
 
 def test_sync_publishes_real_sqlite_database(export_config, source_dataset, capsys):
-    assert main(["sync", "--config", str(export_config)]) == 0
+    assert main(["sync"]) == 0
     destination = load_config(export_config).sync.output
     with closing(sqlite3.connect(destination)) as connection:
         assert connection.execute('SELECT count(*) FROM "Resistors"').fetchone() == (2,)
@@ -79,14 +85,14 @@ def test_sync_publishes_real_sqlite_database(export_config, source_dataset, caps
 @pytest.mark.parametrize("command", ["validate", "sync"])
 def test_missing_export_sections_fail_before_http(export_config, source_dataset, capsys, command):
     export_config.write_text(export_config.read_text(encoding="utf-8").split("[sync]")[0], encoding="utf-8")
-    assert main([command, "--config", str(export_config)]) == 2
+    assert main([command]) == 2
     assert "require [sync]" in capsys.readouterr().err
     source_dataset.assert_not_called()
 
 
 def test_inspect_accepts_minimal_configuration(export_config, source_dataset, capsys):
     export_config.write_text(export_config.read_text(encoding="utf-8").split("[sync]")[0], encoding="utf-8")
-    assert main(["inspect", "--config", str(export_config)]) == 0
+    assert main(["inspect"]) == 0
     assert "Nested parameter retrieval: used" in capsys.readouterr().out
 
 
@@ -97,7 +103,7 @@ def test_invalid_source_does_not_modify_destination(export_config, source_datase
     destination.write_bytes(b"previous")
     parameters = {**export_dataset.parameters[20], 10: replace(export_dataset.parameters[20][10], data="malformed")}
     source_dataset.return_value = replace(export_dataset, parameters={**export_dataset.parameters, 20: parameters})
-    assert main([command, "--config", str(export_config)]) == 2
+    assert main([command]) == 2
     assert "Part pk=20" in capsys.readouterr().err
     assert destination.read_bytes() == b"previous"
     assert [p.name for p in destination.parent.iterdir()] == [destination.name]
@@ -106,14 +112,14 @@ def test_invalid_source_does_not_modify_destination(export_config, source_datase
 @pytest.mark.parametrize("command", ["validate", "sync"])
 def test_missing_library_has_useful_error(export_config, source_dataset, library_layout, capsys, command):
     (library_layout.symbols_dir / "Passives.SchLib").unlink()
-    assert main([command, "--config", str(export_config)]) == 2
+    assert main([command]) == 2
     assert "Missing library file" in capsys.readouterr().err
 
 
 @pytest.mark.parametrize("failure,code,label", [(APIError("HTTP 401"), 3, "API error"), (RuntimeError("internal-secret"), 1, "Unexpected failure")])
 def test_full_workflow_source_errors(export_config, source_dataset, capsys, failure, code, label):
     source_dataset.side_effect = failure
-    assert main(["sync", "--config", str(export_config)]) == code
+    assert main(["sync"]) == code
     result = capsys.readouterr()
     assert label in result.err and "internal-secret" not in result.err
     assert "successful" not in result.out.lower()
@@ -121,7 +127,7 @@ def test_full_workflow_source_errors(export_config, source_dataset, capsys, fail
 
 def test_filesystem_failure_has_exit_code_four(export_config, source_dataset, monkeypatch, capsys):
     monkeypatch.setattr("inventree_sync.sqlite.os.replace", Mock(side_effect=PermissionError("file locked")))
-    assert main(["sync", "--config", str(export_config)]) == 4
+    assert main(["sync"]) == 4
     result = capsys.readouterr()
     assert "Database error" in result.err and "file locked" in result.err
     assert "successful" not in result.out.lower()
@@ -131,7 +137,7 @@ def test_filesystem_failure_has_exit_code_four(export_config, source_dataset, mo
 def test_missing_credentials_and_no_secret_output(export_config, monkeypatch, runtime_token, capsys, command):
     export_config.write_text(export_config.read_text(encoding="utf-8").replace("[inventree]", '[inventree]\nauth = "token"'), encoding="utf-8")
     monkeypatch.delenv("INVENTREE_API_TOKEN")
-    assert main([command, "--config", str(export_config)]) == 2
+    assert main([command]) == 2
     result = capsys.readouterr()
     assert "environment variable" in result.err
     assert runtime_token not in result.err + result.out
@@ -156,7 +162,7 @@ def test_complete_cli_with_only_mocked_http(export_config, export_dataset, monke
     responses[0].json.return_value = categories
     responses[1].json.return_value = parts
     session.get.side_effect = responses
-    assert main([command, "--config", str(export_config)]) == 0
+    assert main([command]) == 0
     assert session.get.call_count == 2
     session.close.assert_called_once()
     result = capsys.readouterr()
@@ -173,7 +179,7 @@ def test_invalid_output_extension_fails_before_retrieval(export_config, source_d
     destination.parent.mkdir()
     destination.write_bytes(b"unrelated existing file")
     before = {path: path.read_bytes() for path in tmp_path.rglob("*") if path.is_file()}
-    assert main([command, "--config", str(export_config)]) == 2
+    assert main([command]) == 2
     result = capsys.readouterr()
     assert "Configuration error" in result.err and ".sqlite or .sqlite3" in result.err
     assert "successful" not in result.out.lower()
@@ -184,7 +190,7 @@ def test_invalid_output_extension_fails_before_retrieval(export_config, source_d
 @pytest.mark.parametrize("extension", [".sqlite3", ".SQLITE", ".SQLITE3"])
 def test_sync_supported_output_extensions(export_config, source_dataset, capsys, extension):
     export_config.write_text(export_config.read_text(encoding="utf-8").replace("components.sqlite", "components" + extension), encoding="utf-8")
-    assert main(["sync", "--config", str(export_config)]) == 0
+    assert main(["sync"]) == 0
     destination = load_config(export_config).sync.output
     with closing(sqlite3.connect(destination)) as connection:
         assert connection.execute("PRAGMA integrity_check").fetchone() == ("ok",)
@@ -194,19 +200,19 @@ def test_sync_supported_output_extensions(export_config, source_dataset, capsys,
 
 def test_inspect_does_not_require_valid_export_extension(export_config, source_dataset, capsys):
     export_config.write_text(export_config.read_text(encoding="utf-8").replace("components.sqlite", "components.accdb"), encoding="utf-8")
-    assert main(["inspect", "--config", str(export_config)]) == 0
+    assert main(["inspect"]) == 0
     assert "Nested parameter retrieval: used" in capsys.readouterr().out
 
 
 @pytest.mark.parametrize("suffix", ["-wal", "-shm", "-journal"])
 def test_journal_conflict_reports_exit_code_four_and_preserves_files(export_config, source_dataset, tmp_path, capsys, suffix):
-    assert main(["sync", "--config", str(export_config)]) == 0
+    assert main(["sync"]) == 0
     capsys.readouterr()
     destination = load_config(export_config).sync.output
     sidecar = Path(str(destination) + suffix)
     sidecar.write_bytes(b"another SQLite consumer's sidecar")
     before = {path: path.read_bytes() for path in tmp_path.rglob("*") if path.is_file()}
-    assert main(["sync", "--config", str(export_config)]) == 4
+    assert main(["sync"]) == 4
     result = capsys.readouterr()
     assert "Database error" in result.err and str(sidecar) in result.err
     assert "publication blocked" in result.err and "successful" not in result.out.lower()
@@ -233,7 +239,7 @@ def test_default_discovery_and_single_credential_prompt(export_config, source_da
 @pytest.mark.parametrize("failure", [EOFError, OSError, KeyboardInterrupt])
 def test_unavailable_interactive_input_fails_safely(export_config, source_dataset, monkeypatch, capsys, failure):
     monkeypatch.setattr("builtins.input", Mock(side_effect=failure))
-    assert main(["inspect", "--config", str(export_config)]) == 2
+    assert main(["inspect"]) == 2
     assert "interactive credential input" in capsys.readouterr().err
     source_dataset.assert_not_called()
 
@@ -246,7 +252,7 @@ def test_password_fallback_is_rejected_before_echo(export_config, source_dataset
         warnings.warn("Password input may be echoed", getpass.GetPassWarning)
         pytest.fail("Unprotected fallback must not execute")
     monkeypatch.setattr("inventree_sync.cli.getpass.getpass", insecure_fallback)
-    assert main(["inspect", "--config", str(export_config)]) == 2
+    assert main(["inspect"]) == 2
     assert "interactive credential input" in capsys.readouterr().err
     source_dataset.assert_not_called()
 
@@ -255,7 +261,7 @@ def test_password_fallback_is_rejected_before_echo(export_config, source_dataset
 def test_empty_interactive_credentials(export_config, source_dataset, monkeypatch, capsys, username, password, reason):
     monkeypatch.setattr("builtins.input", lambda prompt: username)
     monkeypatch.setattr("inventree_sync.cli.getpass.getpass", lambda prompt: password)
-    assert main(["inspect", "--config", str(export_config)]) == 2
+    assert main(["inspect"]) == 2
     assert reason in capsys.readouterr().err
     source_dataset.assert_not_called()
 
@@ -265,4 +271,51 @@ def test_help_never_prompts_or_initializes_config(monkeypatch, capsys):
     with pytest.raises(SystemExit) as done:
         main(["--help"])
     assert done.value.code == 0
-    assert "--config" in capsys.readouterr().out
+    assert "--config" not in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("arguments", [["--config", "arbitrary.toml"], ["inspect", "--config", "arbitrary.toml"]])
+def test_cli_rejects_config_override(monkeypatch, arguments):
+    monkeypatch.setattr("inventree_sync.cli.configuration_directory", lambda: pytest.fail("No config lookup"))
+    with pytest.raises(SystemExit) as done:
+        main(arguments)
+    assert done.value.code == 2
+
+
+@pytest.mark.parametrize("command", [[], ["sync"], ["inspect"], ["validate"]])
+def test_missing_config_never_reads_example_or_prompts(tmp_path, monkeypatch, capsys, command):
+    monkeypatch.setattr("inventree_sync.cli.configuration_directory", lambda: tmp_path)
+    monkeypatch.setattr("builtins.input", lambda prompt: pytest.fail("No first-run prompts"))
+    (tmp_path / "config.example.toml").write_text("not valid TOML", encoding="utf-8")
+    before = {p: p.read_bytes() for p in tmp_path.rglob("*") if p.is_file()}
+    assert main(command) == 2
+    error = capsys.readouterr().err
+    assert "Configuration file not found:" in error and str(tmp_path / "config.toml") in error
+    assert "same directory as inventree-sync.exe" in error and "tools/README.md" in error
+    assert {p: p.read_bytes() for p in tmp_path.rglob("*") if p.is_file()} == before
+
+
+@pytest.mark.parametrize("existing", [False, True])
+@pytest.mark.parametrize("failure", [APIError("HTTP 401"), APIError("Connection failed")])
+def test_api_failure_preserves_offline_snapshot(export_config, source_dataset, capsys, existing, failure):
+    destination = load_config(export_config).sync.output
+    if existing:
+        destination.parent.mkdir()
+        destination.write_bytes(b"previous snapshot")
+    source_dataset.side_effect = failure
+    assert main([]) == 3
+    output = capsys.readouterr()
+    assert "Synchronization successful" not in output.out
+    assert ("remains available for offline use" in output.err) == existing
+    if existing:
+        assert destination.read_bytes() == b"previous snapshot"
+    else:
+        assert not destination.exists()
+
+
+def test_api_failure_code_survives_unavailable_snapshot_stat(export_config, source_dataset, monkeypatch, capsys):
+    source_dataset.side_effect = APIError("Connection failed")
+    monkeypatch.setattr(Path, "is_file", Mock(side_effect=PermissionError))
+    assert main([]) == 3
+    error = capsys.readouterr().err
+    assert "API error" in error and "remains available" not in error

@@ -81,14 +81,8 @@ InvenTree remains the source of truth. Only nonempty exported leaf categories be
 
 API/authentication, validation, staging, verification and publication failures preserve the previous database. A sync API failure explicitly reports an existing local snapshot as unchanged and available offline, while returning failure. `database/components.sqlite` is an intentional tracked cache, not a second source of truth. Before manually committing an updated snapshot, close consumers, verify integrity/schema/content and ensure no journal dependencies remain. Other generated databases, sidecars, locks, candidates, environment files and local config remain ignored. The verified `tools/inventree-sync.exe` is also intentionally tracked. No runtime/build step commits or pushes either artifact.
 
-Altium DbLib and binary symbol/footprint libraries are never modified by synchronization. The separate [setup-odbc.ps1](../setup-odbc.ps1) configures the local 64-bit `AltiumComponents` User DSN; the tracked DbLib uses that stable DSN through MSDASQL. Setup reads the standard `database/components.sqlite` path independently of synchronization TOML. See the [user guide](../README.md) for setup and verification. Configure field mappings manually, including ordinary `InvenTree PK` -> `InvenTree PK`. Unit tests and native executable tests do not prove Altium compatibility or the existence of models inside binary libraries. Verify lookup, placement, `Comment =Value`, parameters and PCB footprint transfer manually.
+Altium DbLib and binary symbol/footprint libraries are never modified by synchronization. The independent [setup-odbc project](../setup-odbc/README.md) produces `tools/setup-odbc.exe`, which configures the local 64-bit `AltiumComponents` User DSN. The tracked DbLib uses that stable DSN through MSDASQL. Setup resolves the standard `database/components.sqlite` path independently of synchronization TOML and has its own package, environment, tests, build and workflow. The inventree-sync test suite has no ODBC dependency.
 
-The ordinary test suite includes PowerShell setup tests with mocked Wdac operations. It never configures production DSNs. To additionally exercise an installed SQLite3 x64 ODBC driver against disposable databases and a unique temporary User DSN:
-
-```powershell
-& ./tools/inventree-sync/.venv/Scripts/python.exe -m pytest tools/inventree-sync/tests/test_odbc_setup.py --odbc-integration -p no:cacheprovider
-```
-
-The optional test covers native create/repeat/move/check, rollback on corrupt data, refusal to create missing files and actual write rejection. It cleans up its test DSN. It does not test the Altium UI. Python is used only by the test runner, not by the setup utility.
+See the [user guide](../README.md) for setup and verification. Configure field mappings manually, including ordinary `InvenTree PK` -> `InvenTree PK`. Unit tests and native executable tests do not prove Altium compatibility or the existence of models inside binary libraries. Verify lookup, placement, `Comment =Value`, parameters and PCB footprint transfer manually.
 
 Exit codes: 0 success; 1 unexpected error; 2 configuration/data/secure input; 3 API/authentication; 4 database/filesystem/locking/publication.

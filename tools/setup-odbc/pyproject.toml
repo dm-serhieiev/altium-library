@@ -1,0 +1,25 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "altium-setup-odbc"
+version = "0.1.0"
+description = "Independent Windows SQLite ODBC setup for Altium DbLib"
+requires-python = ">=3.11"
+dependencies = []
+
+[project.optional-dependencies]
+test = ["pytest==9.1.1"]
+build = ["pyinstaller==6.22.0"]
+
+[project.scripts]
+setup-odbc = "setup_odbc.console:run_cli"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "--strict-markers --import-mode=importlib"
+markers = ["integration: opt-in Windows SQLite ODBC driver test"]

@@ -82,9 +82,10 @@ config.local.toml
 *.[sS][qQ][lL][iI][tT][eE]3-shm
 *.sync.lock
 
-# Only the verified Windows application is intentionally versioned.
+# Only the two verified Windows applications are intentionally versioned.
 *.exe
 !/tools/inventree-sync.exe
+!/tools/setup-odbc.exe
 
 # Tokens / secrets
 *.token

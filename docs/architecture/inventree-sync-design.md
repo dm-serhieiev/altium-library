@@ -37,6 +37,8 @@ database/components.sqlite       # tracked перевірений offline snapsh
 tools/
 ├── README.md                    # інструкції користувача
 ├── inventree-sync.exe           # tracked перевірений executable
+├── setup-odbc.exe               # tracked незалежний ODBC executable
+├── setup-odbc/                  # окремий Python-проєкт, розділ 8.2
 ├── config.toml                  # локальний, ignored
 ├── config.example.toml          # лише ручний reference
 └── inventree-sync/              # нижче — вміст Python-проєкту
@@ -77,7 +79,7 @@ tools/inventree-sync/
     └── test_sqlite.py     # round-trip, constraints, verification, publication failures
 ```
 
-Залежності: Python 3.11+ (`tomllib`, `dataclasses`, `argparse`, `pathlib`, `logging`, `sqlite3`), `requests` для HTTP, `pytest` для тестування; версії зафіксовані в `pyproject.toml`. Генерація та unit-тести не потребують Altium або ODBC-драйвера. SQLite ODBC потрібен тільки споживачу Altium DbLib і налаштовується вручну.
+Залежності: Python 3.11+ (`tomllib`, `dataclasses`, `argparse`, `pathlib`, `logging`, `sqlite3`), `requests` для HTTP, `pytest` для тестування; версії зафіксовані в `pyproject.toml`. Генерація та unit-тести не потребують Altium або ODBC-драйвера. SQLite ODBC потрібен споживачу Altium DbLib; локальний DSN налаштовує незалежний setup-odbc (розділ 8.2).
 
 Основні контракти функцій:
 
@@ -420,45 +422,48 @@ Smoke tests запускають exe з unrelated cwd, paths із пробіла
 
 Після успішного sync відкрити `components.sqlite` або налаштований `.sqlite3` файл у DB Browser for SQLite або SQLiteStudio. Перевірити список компонентних таблиць, структуру TEXT полів та Browse Data; для стабільного читання використовувати `SELECT ... ORDER BY "IPN"`. Не зберігати ручні виправлення як джерело даних: наступний snapshot їх замінить. Перед наступним sync закрити viewer, Altium та інших SQLite consumers, щоб вони завершили транзакції й нормальне journal cleanup.
 
-Tracked `database/Components.DbLib` використовує стабільний User DSN `AltiumComponents` через MSDASQL. Локальний абсолютний шлях до стандартного `database/components.sqlite` налаштовує окремий `tools/setup-odbc.ps1` (розділ 8.2); він не читає sync TOML. Драйвер — 64-бітний SQLite3 ODBC для відповідної розрядності Altium. У Database Library виконати Connect, увімкнути поточні непорожні таблиці й призначити `IPN` ключем. Налаштувати наведений у розділі 6 mapping `Library Ref`, `Library Path`, `Footprint Ref`, `Footprint Path`; квадратні дужки у mapping позначають спеціальні цілі Altium, не SQL quoting і не частину database column names.
+Tracked `database/Components.DbLib` використовує стабільний User DSN `AltiumComponents` через MSDASQL. Локальний абсолютний шлях до стандартного `database/components.sqlite` налаштовує окремий `tools/setup-odbc.exe` (розділ 8.2); він не читає sync TOML. Драйвер — 64-бітний SQLite3 ODBC для відповідної розрядності Altium. У Database Library виконати Connect, увімкнути поточні непорожні таблиці й призначити `IPN` ключем. Налаштувати наведений у розділі 6 mapping `Library Ref`, `Library Path`, `Footprint Ref`, `Footprint Path`; квадратні дужки у mapping позначають спеціальні цілі Altium, не SQL quoting і не частину database column names.
 
 `Value` залишити звичайним database parameter; Comment string символу `=Value` налаштовується вручну у Altium, якщо ще не заданий. Не створювати synthetic database `Comment`. Явний InvenTree `Comment` залишається звичайним параметром. Перевірити пошук IPN, placement символу, Comment і передачу footprint на PCB. Після перейменування категорії оновити table mapping DbLib вручну. Скрипт не створює і не редагує DbLib, libraries або binary models.
 
 ### 8.2. Незалежне локальне налаштування ODBC
 
-`tools/setup-odbc.ps1` — standalone Windows PowerShell 5.1 script для Windows 10/11. Це не частина sync pipeline: `inventree-sync.exe` оновлює SQLite, setup налаштовує Windows ODBC. Немає залежності від Python, InvenTree, мережі, сторонніх PowerShell modules або compiled helper. Setup не завантажує/інсталює драйвери та не змінює database contents чи Altium files.
+`tools/setup-odbc/` — незалежний Python 3.11+ проєкт з пакетом `setup_odbc`, власними `pyproject.toml`, `.venv`, tests, `build.ps1` та `.github/workflows/setup-odbc-windows.yml`. Результат — tracked `tools/setup-odbc.exe` для Windows x64. Залежності runtime — лише стандартна бібліотека; setuptools, pytest та PyInstaller потрібні розробнику. Готовому executable не потрібні встановлені Python або PowerShell.
 
-Єдина одноразова repository-зміна в DbLib — рядок нижче, зі збереженням решти байтів, CRLF, таблиць і mappings:
+`inventree-sync` оновлює SQLite; `setup-odbc` налаштовує локальний Windows User DSN. Setup не імпортує synchronization package, не використовує його environment/build/executable, не читає TOML і не звертається до InvenTree. Не завантажує драйвери та не змінює SQLite або Altium files. Попередню PowerShell/Wdac реалізацію замінено native Python API реалізацією; це зміна deployment, не напрямку синхронізації чи контракту даних.
+
+Вже наявний рядок DbLib зберігається без змін, разом з рештою байтів і mappings:
 
 ```ini
 ConnectionString=Provider=MSDASQL.1;Persist Security Info=False;Extended Properties="DSN=AltiumComponents;"
 ```
 
-Абсолютного database path і Driver name у цьому рядку немає. Runtime setup не переписує DbLib; локальний шлях зберігається тільки у Windows DSN. Одне ім'я DSN у профілі Windows відповідає одному активному checkout.
-
-Запуск із repository root:
+Двічі клацнути `tools/setup-odbc.exe` у Explorer або запустити з repository root:
 
 ```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File .\tools\setup-odbc.ps1
-powershell -NoProfile -ExecutionPolicy Bypass -File .\tools\setup-odbc.ps1 -CheckOnly
+.\tools\setup-odbc.exe
+.\tools\setup-odbc.exe --check-only
+.\tools\setup-odbc.exe --driver-name "SQLite3 ODBC Driver"
 ```
 
 Алгоритм:
 
-1. Перевірити 64-бітний Windows PowerShell 5.1 та завантажити вбудований Wdac. Для 32-бітного host повернути помилку з інструкцією запуску через Sysnative, не змінюючи DSN.
-2. Визначити `../database/components.sqlite` від `$PSScriptRoot`, незалежно від cwd та sync TOML. Перевірити regular file, SQLite signature, page size/file length. Відсутню чи пошкоджену базу не створювати й не ремонтувати. Пробіли та Unicode підтримуються.
-3. Тримати read-only file handle з `FileShare.Read` до завершення перевірки; він забороняє паралельне відкриття для запису/заміни. Перевірити відсутність WAL/SHM/journal entries, включно з помилкою доступу до sidecar; при конфлікті закрити споживачів і дати SQLite штатно завершити recovery/cleanup. Нічого не видаляти.
-4. Через `Get-OdbcDriver` перевірити точний 64-бітний запис `SQLite3 ODBC Driver`, показуючи лише SQLite-related names/platforms. Опційний `-DriverName` допускає точну зареєстровану назву сумісного `sqlite3odbc.dll`, без wildcard або заміни іншою реалізацією. Відсутній driver означає помилку й інструкцію окремо встановити x64 driver.
-5. Через `Get-OdbcDsn` перевірити `AltiumComponents` у всіх scopes/platforms. Лише MI_RESULT_NOT_FOUND означає відсутність; permission/CIM errors не ігноруються. Same-name System DSN, інший driver або 32-bit-only DSN — conflict без зміни. Windows має спільний User DSN namespace, тому matching 32-bit view поряд із тим самим 64-bit User DSN не є окремим conflict.
-6. Якщо DSN відсутній, `Add-OdbcDsn -DsnType User -Platform '64-bit'` задає `Database=<absolute path>` і `NoCreat=1`. Для compatible DSN зі старим path `Set-OdbcDsn` змінює тільки `Database`; решта settings зберігаються. Equivalent paths (case, slash, dot segments) не змінюються. `-CheckOnly` при відсутності/іншому path повертає помилку, не викликаючи mutations. Конфлікти розв'язуються користувачем в ODBC Data Sources; `-Force` немає.
-7. Повторно прочитати DSN та перевірити driver/platform/path. Виконати read-only ODBC test через `System.Data.Odbc`: `SELECT name FROM sqlite_master LIMIT 1` та `PRAGMA database_list` для підтвердження фактичного main file. Усі connection/command/reader/file handles закриваються.
-8. Якщо configuration/read-back/connection test не вдався після mutation, відновити попередній Database attribute (або його відсутність) чи прибрати щойно створений DSN, якщо ownership зрозумілий. Перевірити rollback read-back. При конфлікті/помилці rollback повідомити `Rollback incomplete`, зберігши початкову помилку. Не видаляти й не переписувати unrelated DSNs.
+1. Перевірити 64-бітний Windows process. Frozen executable визначає tools directory як `Path(sys.executable).resolve().parent`; source — від розташування модуля. Єдиний database path — `../database/components.sqlite`, незалежно від cwd/TOML. Пробіли, Unicode та інші диски підтримуються.
+2. Перевірити regular file, SQLite signature, page size і file length. Тримати `CreateFileW` read handle з лише `FILE_SHARE_READ` до завершення setup: запис/заміна заблоковані. WAL/SHM/journal entries, включно з empty files, directories, dangling links та inspection errors, блокують setup. Не створювати, не ремонтувати базу й не видаляти журнали.
+3. Через read-only `winreg` перевірити ODBC registration у двох views. Вибрати точний installed 64-bit `SQLite3 ODBC Driver` з DLL `sqlite3odbc.dll`. `--driver-name` дозволяє явний сумісний alias, не wildcard/іншу реалізацію. Діагностика показує лише SQLite names/platforms. Permission errors не є відсутністю.
+4. Перевірити fixed `AltiumComponents` у User/System scopes. Same-name System DSN, orphaned registration, інший driver/DLL або 32-bit-only registration — conflict. Matching shared User DSN views дозволені, але не замінюють перевірку 64-bit driver. Nonempty `TraceFile`, `LoadExt`, `AttachAs`, `JournalMode`, `SyncPragma` відхиляються до connection. Semicolon paths лишаються забороненими через setup parser драйвера.
+5. `SQLConfigDataSourceW` створює тільки User DSN з double-null-terminated ASCII attributes DSN/NoCreat=1 і null HWND. Unicode Database path записується через `SQLWritePrivateProfileStringW` з явним User scope та відновленням попереднього `SQLGetConfigMode`/`SQLSetConfigMode`. Так шлях не проходить ANSI setup parser. Existing DSN змінює тільки Database; equivalent absolute paths не змінюються. `--check-only` не робить mutations, відсутність/інший path — помилка.
+6. Повторно прочитати та порівняти повний очікуваний DSN. Через Unicode ODBC API у `odbc32.dll` створити реальне підключення без GUI prompt. Driver ігнорує generic `SQL_ATTR_ACCESS_MODE`; override plain DSN path використовує equivalent `file:` URI з `mode=ro&immutable=1`, `NoCreat=1`, bounded timeout і вимкненим connection tracing. Immutable припущення дозволене лише для guarded snapshot без sidecars. У DSN залишається plain absolute path.
+7. Виконати лише `SELECT name FROM sqlite_master LIMIT 1` та `PRAGMA database_list`; підтвердити actual main file. Unicode buffers, pointer-sized handles/SQLLEN і cleanup усіх ODBC/file handles обов'язкові. Driver diagnostic text/connection strings не виводяться; SQLSTATE можна показати.
+8. При configuration/read-back/connection failure відновити previous Database value або absence; новий DSN видалити лише за підтвердженого expected state. Rollback повторно перевіряється. Невідомі/concurrent зміни всього DSN зберігаються, initial error і `Rollback incomplete` повідомляються. Named mutex координує instances цієї програми в одній Windows session. Installer API не дає атомарної транзакції з external DSN editors; не редагувати той самий DSN паралельно. Не змінювати unrelated DSNs.
 
-Driver-specific safety: ця реалізація SQLite3 ODBC ігнорує generic `SQL_ATTR_ACCESS_MODE`; verification connection використовує еквівалентний `file:` URI з `mode=ro&immutable=1` і `NoCreat=1`. Plain absolute path залишається у DSN; URI override застосовується тільки після перевірки прочитаного path. `immutable` дозволено лише для guarded snapshot без sidecars, щоб перевірка не створила WAL/SHM. Невідома/несумісна реалізація не підміняється автоматично. Nonempty `TraceFile`, `LoadExt`, `AttachAs`, `JournalMode`, `SyncPragma` у наявному DSN — conflict: setup не виконує connection-time side effects. Native-перевірка виявила, що setup interface цього драйвера обрізає path на `;` навіть із quoting; такі paths відхиляються до mutation, без прямого registry workaround.
+Explorer-owned console чекає Enter, зокрема для help/errors. Незалежний `setup_odbc.console` враховує PyInstaller parent/child; existing terminal, redirected streams, CI, pytest та uncertain ownership не блокуються. Exit codes: 0 verified, 1 setup/runtime failure, 2 argument error. Administrator для звичайного User DSN не потрібен.
 
-Основи контракту: [Wdac Add-OdbcDsn](https://learn.microsoft.com/en-us/powershell/module/wdac/add-odbcdsn), [Wdac Set-OdbcDsn](https://learn.microsoft.com/en-us/powershell/module/wdac/set-odbcdsn), [Windows User DSN bitness](https://learn.microsoft.com/en-us/troubleshoot/sql/connect/odbc-tool-displays-32-bit-64-bit), [SQLite URI modes](https://sqlite.org/uri.html), [SQLite ODBC source](https://github.com/softace/sqliteodbc/blob/master/sqlite3odbc.c).
+Build запускає власні unit tests, створює unique `build/` candidate з `src/run.py` (`--onefile --console --name setup-odbc`), перевіряє executable та лише тоді робить same-volume replacement `tools/setup-odbc.exe`. Failed build/smoke/publication зберігає попередній executable; cleanup лише власних artifacts. Немає launcher, постійного dist або ZIP. Окрема Windows CI використовує Python 3.11 x64 й uploads final executable без commit/push; ODBC source changes не перебудовують inventree-sync.
 
-Setup повертає `0` тільки після успішної перевірки, `1` при помилці. Звичайний User DSN setup не потребує адміністратора. Offline unit tests підміняють Wdac calls та connectivity, перевіряючи paths, idempotence, errors, conflicts, rollback і незмінність SQLite/DbLib bytes. `--odbc-integration` — явний opt-in до встановленого driver: тільки disposable databases та унікальний тимчасовий User DSN з cleanup, ніколи production DSN. ODBC-тести не доводять Altium placement або correctness моделей; Connect, IPN lookup, Comment, mappings і PCB transfer перевіряються вручну.
+Ordinary tests mock native ODBC operations. Реальні executable smoke tests перевіряють запуск без Python у PATH, інший cwd, spaces/Unicode, help/check-only/errors, redirects і owned/terminal/CI console behavior без production DSN mutations. `--odbc-integration` — явний opt-in: disposable SQLite files, унікальний temporary User DSN, create/repeat/move/check/rollback, read-only/no-create і cleanup. Tracked database/DbLib bytes зберігаються. Altium Connect, IPN lookup, mappings, symbol placement і PCB footprint transfer лишаються ручними перевірками.
+
+Докладна структура, команди та первинні API references: [setup-odbc developer guide](../../tools/setup-odbc/README.md). Основи: [SQLConfigDataSource](https://learn.microsoft.com/en-us/sql/odbc/reference/syntax/sqlconfigdatasource-function), [SQLWritePrivateProfileString](https://learn.microsoft.com/en-us/sql/odbc/reference/syntax/sqlwriteprivateprofilestring-function), [shared User DSN views](https://learn.microsoft.com/en-us/troubleshoot/sql/connect/odbc-tool-displays-32-bit-64-bit), [SQLite URI modes](https://sqlite.org/uri.html), [SQLite ODBC source](https://github.com/softace/sqliteodbc/blob/master/sqlite3odbc.c).
 
 ## 9. Послідовність і контроль якості
 

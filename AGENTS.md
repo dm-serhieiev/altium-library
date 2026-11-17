@@ -118,7 +118,7 @@ The Altium `.DbLib` consumes the generated SQLite database through the separatel
 The explicitly authorized one-time ODBC setup change makes the tracked
 `database/Components.DbLib` use `DSN=AltiumComponents` through MSDASQL. Preserve
 its other bytes, mappings and settings. Neither runtime synchronization nor
-`tools/setup-odbc.ps1` may rewrite DbLib. See the independent setup rules below.
+`tools/setup-odbc.exe` may rewrite DbLib. See the independent setup rules below.
 
 ---
 
@@ -550,7 +550,7 @@ Do not force-push.
 
 ## 21. Generated files
 
-Two intentional tracked artifacts are `database/components.sqlite` (verified offline component snapshot) and `tools/inventree-sync.exe` (verified Windows application). Keep their tracked status. InvenTree remains the source of truth; the cached snapshot is never synchronized back. Verify integrity, expected schema/content and absence of journal dependencies before tracking an updated database. Do not fabricate a sample database when a production snapshot is unavailable. Failed sync must preserve existing database bytes; a sync API failure reports an existing local database as unchanged and available offline while retaining its failure exit code. Never create commits or push automatically.
+Three intentional tracked artifacts are `database/components.sqlite` (verified offline component snapshot), `tools/inventree-sync.exe` and `tools/setup-odbc.exe` (independently verified Windows applications). Keep their tracked status. InvenTree remains the source of truth; the cached snapshot is never synchronized back. Verify integrity, expected schema/content and absence of journal dependencies before tracking an updated database. Do not fabricate a sample database when a production snapshot is unavailable. Failed sync must preserve existing database bytes; a sync API failure reports an existing local database as unchanged and available offline while retaining its failure exit code. Never create commits or push automatically.
 
 Examples of files which are normally generated or local include:
 
@@ -618,42 +618,70 @@ Do not create a second component database in configuration files.
 
 ## 25. Independent Windows ODBC setup
 
-`tools/setup-odbc.ps1` is a standalone Windows PowerShell 5.1 utility, separate
-from synchronization and configuration TOML. Resolve only the existing
-`../database/components.sqlite` from PSScriptRoot. Never generate or repair a
-database, edit Altium files, contact InvenTree, install/download drivers, or
-modify registry keys directly. Use built-in Wdac cmdlets. Normal operation is a
-64-bit User DSN and does not require administrator privileges.
+`tools/setup-odbc/` is a separate Python 3.11+ project, packaged as the tracked
+Windows x64 console executable `tools/setup-odbc.exe`. It has its own package
+`setup_odbc`, source, tests, `.venv`, build script and GitHub Actions workflow.
+Never import `inventree_sync`, share its environment/build, read configuration
+TOML, contact InvenTree or launch PowerShell at runtime. The prepared executable
+needs neither installed Python nor PowerShell. PowerShell is only a developer
+build tool. Use standard-library ctypes/winreg, no external runtime dependency.
 
-The public DSN name is fixed as `AltiumComponents`. Validate the installed
-64-bit `SQLite3 ODBC Driver` (`sqlite3odbc.dll`); an explicit DriverName may
-select a compatible registered alias, never an unrelated implementation.
-Reject a 32-bit PowerShell host with instructions for starting the 64-bit host.
-List only SQLite-related driver names/platforms for diagnostics. Fail on Wdac
-inspection errors rather than treating them as absence.
+Resolve only the existing `../database/components.sqlite` from the frozen
+executable directory (`Path(sys.executable).resolve().parent`) or equivalent
+source-file layout, never cwd or an arbitrary search. Never generate or repair a
+database, edit Altium files, install/download drivers or write registry keys
+directly. Use documented Unicode Windows ODBC installer APIs. Normal operation
+creates a 64-bit User DSN without administrator privileges.
 
-Create missing User DSNs, change only the database path of compatible existing
-DSNs after a move, and leave equivalent paths unchanged. Reject same-name System
-DSNs, incompatible drivers and 32-bit-only DSNs without modifying them. A matching
-32-bit view of the same compatible User DSN is not a separate conflict (Windows
-shares the User DSN namespace). There is no Force override: conflicting settings
-must be resolved explicitly in ODBC Data Sources. Never modify unrelated DSNs.
+The public DSN is fixed as `AltiumComponents`. Check the 64-bit Windows host and
+installed 64-bit `SQLite3 ODBC Driver` (`sqlite3odbc.dll`); `--driver-name` may
+select a compatible registered alias only. Inspect driver/DSN registration through
+read-only winreg APIs in both views. List only SQLite driver names/platforms.
+Inspection failures must fail closed, never mean absence. Reject orphaned
+registrations, conflicting System DSNs, incompatible driver/DLL paths and
+32-bit-only DSNs. Matching shared User DSN views are allowed, but do not prove
+driver bitness. No Force override; conflicts require manual ODBC Data Sources
+resolution. Never modify unrelated DSNs.
 
-Validate the SQLite header and file length, reject journal sidecars, and hold a
-read-only file handle without write/delete sharing throughout setup. Read back
-the configured path before testing it through System.Data.Odbc. This driver
-ignores SQL_ATTR_ACCESS_MODE: verification must instead use its SQLite URI
-support with `mode=ro&immutable=1` and `NoCreat=1`. The immutable assumption is
-limited to the guarded, journal-free snapshot. DSN storage retains the plain
-absolute path; only the verification connection uses the equivalent URI.
-Execute only harmless schema/database-list reads and dispose all resources.
-Reject DSN options that cause connection-time side effects. The driver's setup
-interface truncates semicolon-containing paths; reject these before mutation.
+Create missing User DSNs with `SQLConfigDataSourceW`, NoCreat=1 and no GUI.
+Write the Unicode Database path via `SQLWritePrivateProfileStringW`, with
+`SQLGetConfigMode`/`SQLSetConfigMode` explicitly limiting writes to User scope
+and restoring the prior mode. Existing compatible DSNs change only Database;
+equivalent paths are unchanged. Preserve all other settings.
+Reject non-text or expandable DSN attributes before mutation; profile writes must
+not silently change their registry types during rollback.
 
-On failed verification, restore the previous database attribute (including its
-absence) or remove a newly created DSN when ownership is clear. Report incomplete
-rollback without hiding the original failure. CheckOnly never changes DSNs.
-Runtime setup never commits or pushes. Ordinary CI tests mock ODBC operations;
-real-driver tests are opt-in, use disposable databases and uniquely named
-temporary User DSNs, and clean up only their own DSNs. Altium placement/mapping
-verification remains manual and must not be claimed from ODBC tests alone.
+Validate the SQLite header and file length, reject all journal sidecar entries
+and inspection failures, and hold a CreateFileW read handle without write/delete
+sharing throughout setup. Read back the full expected DSN before testing it
+through Unicode APIs in odbc32.dll. This driver ignores SQL_ATTR_ACCESS_MODE:
+use its SQLite URI support with `mode=ro&immutable=1` and `NoCreat=1`.
+The immutable assumption is limited to the guarded, journal-free snapshot.
+DSN storage retains a plain absolute path. Execute only harmless schema and
+database-list reads, verify the actual main file, and close every resource.
+Suppress verification connection tracing and reject DSN options that cause
+connection-time side effects. Retain semicolon-path rejection before mutation.
+
+After failed configuration/verification, restore the prior Database attribute,
+including absence, or remove a newly created DSN only when ownership is clear.
+Compare the complete expected state before rollback and verify the result.
+Unexpected concurrent edits must be preserved and incomplete rollback reported
+without hiding the original failure. A named mutex coordinates this tool's
+instances in the same session; installer APIs do not provide atomic transactions
+with external DSN editors. `--check-only` never changes DSNs. The public CLI
+supports only default setup, `--check-only`, `--driver-name` and `--help`;
+exit codes are 0 verified, 1 setup/runtime failure and 2 argument error.
+
+Build independently from src/run.py using onefile/console PyInstaller, a unique
+build/ candidate, unit tests and real executable smoke tests before same-volume
+replacement of tools/setup-odbc.exe. Preserve the old executable on failure and
+clean only owned candidate artifacts. No launcher, permanent dist or ZIP. Keep
+Explorer-owned consoles open for Enter, including help/errors; account for the
+onefile parent/child. Existing terminals, redirected streams, CI and pytest must
+not pause. Tests must cover these policies on the built executable.
+
+Ordinary tests mock ODBC operations and never require an installed driver.
+Native integration is opt-in, uses disposable databases and uniquely named
+temporary User DSNs, and cleans only its resources. Never modify the production
+AltiumComponents DSN or tracked snapshot in tests. Runtime and CI never commit or
+push. Altium placement/mapping verification remains manual.

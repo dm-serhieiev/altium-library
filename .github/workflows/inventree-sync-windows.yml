@@ -6,8 +6,6 @@ on:
       - 'tools/inventree-sync/**'
       - 'tools/config.example.toml'
       - 'tools/README.md'
-      - 'tools/setup-odbc.ps1'
-      - 'database/Components.DbLib'
       - '.gitignore'
       - '.github/workflows/inventree-sync-windows.yml'
   pull_request:
@@ -15,8 +13,6 @@ on:
       - 'tools/inventree-sync/**'
       - 'tools/config.example.toml'
       - 'tools/README.md'
-      - 'tools/setup-odbc.ps1'
-      - 'database/Components.DbLib'
       - '.gitignore'
       - '.github/workflows/inventree-sync-windows.yml'
 permissions:

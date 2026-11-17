@@ -1,0 +1,40 @@
+name: setup-odbc Windows
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - 'tools/setup-odbc/**'
+      - 'tools/README.md'
+      - 'database/Components.DbLib'
+      - 'docs/architecture/inventree-sync-design.md'
+      - 'AGENTS.md'
+      - '.gitignore'
+      - '.github/workflows/setup-odbc-windows.yml'
+  pull_request:
+    paths:
+      - 'tools/setup-odbc/**'
+      - 'tools/README.md'
+      - 'database/Components.DbLib'
+      - 'docs/architecture/inventree-sync-design.md'
+      - 'AGENTS.md'
+      - '.gitignore'
+      - '.github/workflows/setup-odbc-windows.yml'
+permissions:
+  contents: read
+jobs:
+  windows-executable:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          architecture: x64
+      - name: Test, build and smoke-test executable
+        shell: powershell
+        run: ./tools/setup-odbc/build.ps1
+      - uses: actions/upload-artifact@v4
+        with:
+          name: setup-odbc-windows
+          path: tools/setup-odbc.exe
+          if-no-files-found: error

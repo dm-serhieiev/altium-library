@@ -1,687 +1,130 @@
 # Repository Agent Instructions
 
-This file defines the rules for AI coding agents working in this repository.
+This repository contains the Altium component library, InvenTree integration tools and their specifications. Read the relevant documentation before changing code or library data. Keep changes focused, reuse established modules/names and do not redesign an architecture merely because another implementation is easier.
 
-The repository contains the Altium component library, InvenTree integration tools, library conventions, and supporting documentation.
+## Documentation hierarchy
 
-The documentation in the repository is part of the project specification. Read the relevant documentation before modifying code or library data.
+| Responsibility | Authoritative document |
+|---|---|
+| Recommended categories, direct parameters and inheritance | [docs/inventree-category-structure.md](docs/inventree-category-structure.md) |
+| IPN naming and engineering identity | [docs/ipn-naming-convention.md](docs/ipn-naming-convention.md) |
+| Altium libraries, symbols, footprints and 3D conventions | [docs/library-convention.md](docs/library-convention.md) |
+| Synchronization architecture and implementation contracts | [tools/inventree-sync/README.md](tools/inventree-sync/README.md) |
+| Independent Windows ODBC setup contracts | [tools/setup-odbc/README.md](tools/setup-odbc/README.md) |
+| End-user operation of both executables | [tools/README.md](tools/README.md) |
 
----
+The linked technical contracts are mandatory; this file summarizes agent obligations without maintaining another full implementation specification. Markdown is for humans and agents, never a runtime source of component data unless explicitly required by the architecture. Recommended categories are not evidence of deployed server state.
 
-## 1. General working rules
+When code and documentation disagree, investigate and report the affected files/behavior. Do not silently remove a requirement, invent source data or change architecture to justify a shortcut. Identify the conflict, explain the limitation and propose the smallest necessary change. Update externally visible documentation with behavior changes. Retain historical decisions only when they explain a current constraint; do not preserve obsolete development chronology as current requirements.
 
-Before making changes:
+## Source of truth and scope
 
-1. Inspect the existing repository structure.
-2. Read the documentation relevant to the requested task.
-3. Reuse existing naming conventions, architecture, modules, and file locations.
-4. Check whether the requested behavior is already defined by an architecture or convention document.
-5. Do not redesign established architecture simply because another implementation would be easier.
+InvenTree is the sole source of component-library data. Retrieve categories/hierarchy, Parts/IPNs, actual Part parameters and referenced template metadata dynamically. InvenTree handles category assignment/inheritance; consume actual Part parameters instead of reconstructing inheritance locally.
 
-Prefer small, reviewable changes over broad unrelated refactoring.
+Never maintain local configuration copies of the current category tree, category/inherited parameter lists, units, choices or leaf lists. Configuration describes synchronization rules and environment locations. Adding/removing/changing server data should be reflected without editing local category schemas.
 
-Do not modify files unrelated to the requested task unless the change is necessary and clearly explained.
-
-If implementation reveals a conflict, ambiguity, or technical limitation in the existing specification, report it explicitly. Do not silently resolve architectural conflicts by inventing new behavior.
-
----
-
-## 2. Documentation hierarchy
-
-For `inventree-sync`, the authoritative architecture document is:
+Synchronization remains read-only and one-way:
 
 ```text
-docs/architecture/inventree-sync-design.md
+InvenTree -> PreparedDataset -> PreparedTables -> SQLite -> Altium DbLib
 ```
 
-Relevant component-library conventions are located under:
+Do not add create/update/move/rename/delete API operations unless a future task explicitly changes this rule. Never synchronize generated database edits back to InvenTree. Never rewrite DbLib, SchLib or PcbLib during synchronization or ODBC setup. The tracked DbLib already uses DSN=AltiumComponents through MSDASQL; preserve its other bytes/settings unless explicitly authorized to edit it.
 
-```text
-docs/conventions/
-```
+One Part produces one row; Stock Items, Supplier Parts and Manufacturer Parts do not create rows. Part.IPN is the identifier, with no fallback to Part.name. Do not regenerate/rename IPNs or derive Value, Package or electrical characteristics from IPN, name or description.
 
-and include documents such as:
+Do not silently repair source data: no category sanitizing, inferred libraries/footprints, arbitrary defaults, changed decimal separators/SI prefixes or numeric reinterpretation. Package is never an Altium footprint substitute. An error must identify the source object so it can be corrected there.
 
-```text
-inventree-category-structure.md
-ipn-naming-convention.md
-library-convention.md
-```
+## Synchronization boundaries
 
-Architecture documents define how software is expected to work.
+Use Python 3.11+, program/console name `inventree-sync`, package `inventree_sync`, under `tools/inventree-sync/`. Follow the [module responsibilities](tools/inventree-sync/README.md#internal-boundaries). Keep HTTP/API-specific JSON in api/adapters; do not leak raw JSON unnecessarily into schema, transformation or writing.
 
-Convention documents define naming and library rules.
+`prepare_tables(dataset, layout)` is a separate database-independent API. It generates neither SQL nor files. `inspect` performs source retrieval checks; `validate` exercises the complete SQLite export in memory without output files/directories; default `sync` publishes a verified snapshot using sqlite.py. SQLite is the only backend. Use standard-library sqlite3, without ORM, backend selection or database credentials.
 
-Markdown documentation is intended for humans and agents. Runtime synchronization code must not parse these Markdown files as a source of component data unless explicitly required by the architecture.
+### Retrieval and schema
 
-When implementation and documentation disagree, do not silently alter either side. Report the discrepancy and identify the affected files and behavior.
+Follow the [API contract](tools/inventree-sync/README.md#inventree-api-and-authentication): InvenTree 1.5.6/API schema 530; fetch all accessible categories, resolve the configured root PK, then request Parts with category, cascade=true and parameters=true on every page. Never retrieve all Parts and discard those outside scope. Build shared indexes from nested actual parameters/template_detail. Missing/conflicting data fails; no fallback or separate parameter/template requests in this workflow.
 
----
+Complete pagination; retain local tree/scope/Part validation after server filtering. Authorization/HTTP/malformed-pagination/unsupported-response failures must not become empty data. Determine supported behavior from the actual API contract, not guesses. Preserve authenticated redirect refusal and all transport/security checks.
 
-## 3. InvenTree is the source of truth
+Only populated exported leaves create tables; exact leaf names become table names. Empty leaves need no schema discovery. Enforce the naming grammar, sqlite_ reservation and case-insensitive table uniqueness in the technical reference; never rename or truncate identifiers.
 
-InvenTree is the single source of truth for component-library data.
+For each leaf, derive columns from the union of actual Part parameter references. Validate all references before excluding exact names KiCad Symbol, KiCad Footprint, Altium Symbol and Altium Footprint. Retain all source parameters/templates in PreparedDataset. Resolve required Altium assignments independently of output columns; exclusions do not relax assignment, syntax, file-existence or exported model-name uniqueness checks.
 
-The following information must be obtained dynamically from InvenTree where required by the synchronization process:
+Keep the six technical columns in order: IPN, Library Ref, Library Path, Footprint Ref, Footprint Path, InvenTree PK. Dynamic fields follow template PK order; tables category PK order; rows Part PK order. Missing optional assignments become None. InvenTree PK comes only from Part.pk as globally unique canonical positive decimal text; it is not the primary key or an extra index. An ordinary template with that name is a conflict.
 
-- component categories and category hierarchy;
-- Parts;
-- Part IPNs;
-- actual parameters attached to each Part;
-- parameter templates and their metadata;
-- other InvenTree metadata required by the synchronization architecture.
+### Text and transformation
 
-InvenTree itself is responsible for category parameter assignment and inheritance. When a Part is created, the concrete Part exposes the parameters that apply to it, including parameters inherited from higher-level categories. `inventree-sync` must consume those actual Part parameters and must not reconstruct category-parameter inheritance locally.
+Preserve original text in PreparedDataset. In PreparedTables, format ordinary values only with Parameter.data and ParameterTemplate.units, never data_numeric. Follow the [scalar/suffix rules](tools/inventree-sync/README.md#text-and-units) exactly: append missing units with one space, retain compatible existing suffixes including ohm/Ω/Ω, and reject conflicting/ambiguous values contextually. Do not format technical fields or excluded CAD parameters. Missing/empty values become None; whitespace-only optional values remain verbatim.
 
-Do not duplicate component data in repository configuration files.
+Keep strings such as 0603, 1%, 1E3 and =example textual. Do not emit placeholder strings None/NaN/NULL. Never return partial tables after validation failure.
 
-In particular, do not create local configuration files containing hard-coded copies of:
+Parse Altium Symbol/Footprint using the exact [reference grammar](docs/library-convention.md#accepted-reference-syntax); no trimming, library inference or Package fallback. Check configured library files and relative paths from DbLib. Do not claim binary model/pin/3D inspection. Do not synthesize Comment from Value; symbol Comment uses =Value. Explicit ordinary Comment parameters export normally.
 
-- the current category tree;
-- category-specific parameter lists;
-- inherited parameter lists;
-- units;
-- choice lists;
-- current leaf-category lists.
+### SQLite integrity and publication
 
-Changes made in InvenTree should be reflected by synchronization without requiring corresponding edits to repository configuration unless the change affects an actual synchronization rule or software contract.
+Follow the complete [SQLite and publication contracts](tools/inventree-sync/README.md#sqlite-database), including direct writer validation of manually constructed PreparedTables. All columns TEXT; six technical columns NOT NULL; IPN PRIMARY KEY COLLATE NOCASE; global case-insensitive IPN and canonical InvenTree PK uniqueness; no auxiliary user tables/columns. Preserve prepared strings/NULL exactly.
 
----
+Validate identifiers, quote with SQLite double quotes and escape embedded quotes. Parameterize values, never interpolate source values into SQL. Ordinary names may contain punctuation/Unicode but not leading whitespace/control characters; reject collisions. Engine limits fail explicitly, without truncation.
 
-## 4. Synchronization direction
+Build a complete unique staging snapshot in the destination directory, using a transaction, DELETE journaling and normal durable synchronization. Commit/close, reopen read-only, verify integrity, exact schema/constraints and every value, then close verification before os.replace. Failed synchronization before publication must preserve the old database.
 
-Synchronization is strictly one-way:
+Acquire exclusive `<destination>.sync.lock` before staging/publication; never steal/expire another process's lock. Recover stale locks only after manual confirmation that the owner and all relevant sync processes have stopped. Clean only owned staging/lock artifacts and check ownership. Report cleanup failures after publication accurately.
 
-```text
-InvenTree -> prepared logical tables -> generated database -> Altium DbLib
-```
+Under the lock, immediately before replacement, inspect destination -wal/-shm/-journal without opening the published database. Detect every entry, including empty files/dangling symlinks, and fail closed on inspection errors. Preserve external sidecars and destination; code 4 on publication failure. Never checkpoint/repair/delete external journals or force-close consumers. Let their owning application finish normal recovery/cleanup before retrying.
 
-Milestone 1C introduces database-independent `PreparedTables`. Milestone 1D
-selects SQLite as the only supported database backend. Microsoft Access is no
-longer planned or supported. The logical stage must not generate SQL or database
-files. `prepare_tables(dataset, layout)` remains a separate Python API. `inspect`
-reads source data, `validate` exercises the complete export in memory, and `sync`
-publishes a verified SQLite snapshot using `sqlite.py`.
+This lock coordinates sync processes only. Do not claim replacement protects all external readers/races. Close Altium/SQLite consumers before sync; continue reporting Windows sharing failures. Recovery must not recommend journal deletion to bypass protection.
 
-`inventree-sync` must never modify InvenTree.
+## Configuration, credentials and deployment
 
-Do not implement API operations which create, update, move, rename, or delete InvenTree objects unless a future task explicitly changes this architectural rule.
+The [configuration contract](tools/inventree-sync/README.md#configuration) is fixed: frozen config beside sys.executable; source config at repository tools/config.toml from module location. No public config override, cwd/parent/extraction search, first-run setup or automatic example reading/creation. Missing config fails clearly with the user-guide reference. Explicit internal path loading is for tests. Paths are TOML-relative; inspect needs only InvenTree/scope, validate/sync also require output/DbLib/library settings.
 
-The generated SQLite `.sqlite` or `.sqlite3` database is a reproducible intermediate artifact.
+Reject output extensions other than .sqlite/.sqlite3, case-insensitively, and collisions with config/DbLib before retrieval/writes. Keep config.example.toml a tracked placeholder-only manual reference and local config untracked.
 
-It is not a source of truth.
+Default Basic Auth prompts once using input and secure getpass, passes HTTPBasicAuth explicitly and retains credentials only in memory. Abort if secure input is unavailable; no echoed fallback. Never use password arguments, TOML/.env credentials, Credential Manager or persisted tokens. Python cannot guarantee immediate string erasure. Legacy explicit token mode may read its configured environment variable; Basic needs none. HTTP and HTTPS work; keep normal TLS verification and redirect refusal. Do not log secrets or include them in exceptions, reports, fixtures or snapshots.
 
-Manual changes made to the generated database are not preserved and must not be synchronized back to InvenTree.
+Use one ignored tools/inventree-sync/.venv for dev/tests/builds. Follow the [build contract](tools/inventree-sync/README.md#building-the-windows-executable): PSScriptRoot paths, Python 3.11+, test/build extras, full suite, unique build/ candidate from src/run.py, real executable smoke tests before same-volume atomic replacement of the single tracked tools/inventree-sync.exe. Failure preserves the old executable; clean only owned candidates. No launcher, permanent dist or archive. PyInstaller is build-only. Windows Python 3.11 CI uploads the final executable without committing.
 
-The Altium `.DbLib` consumes the generated SQLite database through the separately configured SQLite ODBC connection but is not a source of component data for `inventree-sync`. Never modify `.DbLib`, `.SchLib`, or `.PcbLib` files during synchronization. Do not synthesize a `Comment` column from `Value`; the tested schematic symbol Comment uses `=Value`. An explicit ordinary InvenTree `Comment` parameter is exported normally.
+Console ownership belongs to console.py/src/run.py. Explorer-owned interactive frozen consoles pause on Enter for success/help/errors, preserving exit codes and accounting for onefile parent/child processes. Existing terminals, redirected streams, CI and uncertain ownership must not pause. Test these policies on the actual built executable. No production credentials/server belong in tests.
 
-The explicitly authorized one-time ODBC setup change makes the tracked
-`database/Components.DbLib` use `DSN=AltiumComponents` through MSDASQL. Preserve
-its other bytes, mappings and settings. Neither runtime synchronization nor
-`tools/setup-odbc.exe` may rewrite DbLib. See the independent setup rules below.
+## Independent Windows ODBC setup
 
----
+Read and follow all contracts in [tools/setup-odbc/README.md](tools/setup-odbc/README.md) before changing this utility. It is a separate Python 3.11+ project/package setup_odbc with its own source, tests, .venv, build script, workflow and tracked Windows x64 console executable tools/setup-odbc.exe. Never import inventree_sync, share its environment/build, read TOML, contact InvenTree or launch PowerShell at runtime. Use standard-library ctypes/winreg; no external runtime dependency. Installed Python/PowerShell are not required by the executable.
 
-## 5. `inventree-sync` architecture
+Resolve only the existing ../database/components.sqlite from the executable/module layout, never cwd or a search. Never create/repair a database, edit Altium files, install/download drivers or directly write registry keys. Use documented Unicode Windows ODBC installer APIs; normal setup creates a 64-bit User DSN without elevation.
 
-Before modifying `inventree-sync`, read:
+Keep DSN AltiumComponents fixed. Inspect host/64-bit SQLite3 ODBC Driver (sqlite3odbc.dll) and both registry views read-only. --driver-name selects only a compatible registered alias. List only SQLite driver names/platforms. Inspection errors fail closed. Reject orphaned registrations, System conflicts, incompatible DLL paths and 32-bit-only DSNs. Shared matching User views do not prove driver bitness. No Force override or modification of unrelated DSNs.
 
-```text
-docs/architecture/inventree-sync-design.md
-```
+Create missing User DSNs via SQLConfigDataSourceW with NoCreat=1 and no GUI. Write Unicode Database via SQLWritePrivateProfileStringW with explicit User scope using SQLGetConfigMode/SQLSetConfigMode and restore prior mode. Existing compatible DSNs change only Database; equivalent paths remain unchanged. Reject non-text/expandable attributes before mutation and preserve other settings/types.
 
-Follow the module boundaries and contracts defined there.
+Validate SQLite header/length and reject every sidecar/inspection failure; hold CreateFileW read access without write/delete sharing throughout setup. Read back the complete expected DSN before connection verification. Use Unicode odbc32 APIs and read-only immutable URI plus NoCreat=1 because the driver ignores generic access-mode requests; immutable is valid only under the guarded journal-free snapshot assumption. Keep plain absolute paths in DSN storage. Execute only harmless fixed schema/database-list reads and verify the actual main file; close every resource. Suppress connection tracing and reject side-effect options and semicolon paths before mutation.
 
-The program name and console command are:
+After failed mutation/verification, restore prior Database including absence, or remove a newly created DSN only with clear ownership. Compare full expected state before rollback and verify restoration. Preserve unexpected concurrent edits and report incomplete rollback alongside the original failure. A named same-session mutex coordinates this tool only; installer APIs are not atomic transactions against external editors.
 
-```text
-inventree-sync
-```
+Public CLI: default setup, --check-only, --driver-name, --help only; codes 0 verified, 1 setup/runtime failure, 2 argument error. --check-only never mutates DSNs. Build independently using unique onefile/console candidates, full tests and real executable checks before replacement; preserve old executable on failure and clean only owned artifacts. Apply the same Explorer/terminal/CI console guarantees. No launcher, permanent dist or ZIP.
 
-The Python package is:
+Ordinary tests mock ODBC without an installed driver. Opt-in native integration uses disposable databases and uniquely named temporary User DSNs; clean only those resources. Never use production AltiumComponents or the tracked snapshot in tests. Altium placement/mapping checks remain manual. Runtime/CI never commit or push.
 
-```text
-inventree_sync
-```
+## Coding, errors and tests
 
-The synchronization implementation belongs under:
+Prefer standard-library functionality, dataclasses, explicit types, pathlib, logging and small deterministic functions. Avoid unnecessary frameworks, ORMs, dependencies, global mutable state, metaprogramming or trivial abstraction hierarchies.
 
-```text
-tools/inventree-sync/
-```
+Expected user/data/API failures must be clean and contextual: Part PK/IPN, category PK/path, template PK/name and affected paths where applicable. Follow documented exit codes. Do not hide validation behind generic Invalid data or expose credentials/raw responses. Normal unexpected-error output is concise; do not invent an undocumented debug mode.
 
-Do not introduce a substantially different package structure without a concrete technical reason.
+Every behavior needs appropriate tests. Add regression coverage for bugs where practical; do not weaken/delete tests solely to pass changed code unless an explicitly changed requirement invalidates them. Unit tests use no production credentials/server, Altium or installed ODBC. Separate native integration explicitly. Fixtures must be minimal, anonymized and representative, covering pagination, missing values, empty leaves, differing parameter sets, bad references and API failures as applicable.
 
-If the architecture document specifies a module responsibility, keep that responsibility in the corresponding module rather than duplicating logic elsewhere.
+## Git and generated artifacts
 
----
+Keep changes within the task. Never create commits, branches, tags, releases or PRs without explicit instructions; never rewrite Git history or force-push. Inspect the complete diff and remove accidental changes, temporary generated files and secrets before completion.
 
-## 6. Dynamic schema generation
+Three intentional tracked artifacts are database/components.sqlite, tools/inventree-sync.exe and tools/setup-odbc.exe. Preserve tracked status. Verify database integrity/schema/content and no journal dependencies before tracking an update; never fabricate a production substitute. Sync API failure reports an existing database unchanged/available offline while retaining its failure code. The snapshot never synchronizes back to InvenTree.
 
-The database schema must be derived from the actual parameters of exported InvenTree Parts.
+Respect .gitignore. Other SQLite files, staging/journals/locks, local config and environments normally remain ignored; maintained SQL fixtures remain trackable. Do not remove unrelated historical artifacts as cleanup.
 
-Only a leaf category containing at least one exported Part produces a SQLite component table.
+## Before reporting completion
 
-For each exported leaf category, the program must determine:
+Re-read the task and relevant contracts. Check the full diff for scope, unintended artifacts/secrets and documentation consistency. Run relevant tests and any configured lint/format/type checks; report checks that could not run. Do not claim completion while required behavior is missing.
 
-```text
-leaf category
-        ->
-exported Parts in that category
-        ->
-actual parameters of all Parts
-        ->
-union of referenced parameter templates
-        ->
-effective table schema
-```
+Provide a concise report of behavior, files created/modified, tests/results, assumptions, limitations and discrepancies. Distinguish unit verification from real Windows/ODBC/Altium integration; neither SQLite tests nor a single sample connection proves every production mapping.
 
-InvenTree already applies parameters inherited from higher-level categories to the concrete Part. `inventree-sync` must therefore read the parameters that actually exist on each Part and must not reconstruct category inheritance.
-
-Do not use category parameter assignments or a locally maintained category schema to determine columns.
-
-An empty leaf category produces no SQLite table and does not require schema discovery.
-
-If an ordinary parameter exists on at least one Part in the category, it belongs to the table schema. Parts which do not contain that parameter receive Python `None` (eventually SQL `NULL`) for that column. Dynamic columns remain ordered by ParameterTemplate PK after the six technical columns: `IPN`, `Library Ref`, `Library Path`, `Footprint Ref`, `Footprint Path`, `InvenTree PK`.
-
-Validate all actual parameter references before excluding these exact template names from the output schema: `KiCad Symbol`, `KiCad Footprint`, `Altium Symbol`, `Altium Footprint`. KiCad values are ignored by Altium transformation. The two Altium parameters are mandatory source-only parameters; resolve them through `PreparedDataset.parameters` and `PreparedDataset.templates`, independently of exported columns. Keep all source parameters and templates in `PreparedDataset`.
-
-Do not hard-code the expected schema of categories such as Resistors, Capacitors, Inductors, or Transformers in Python or TOML merely to reproduce the current InvenTree state.
-
-Adding, removing, or changing actual Part parameters in InvenTree should be reflected by the next synchronization without modifying repository configuration.
-
----
-
-## 7. Fixed synchronization contracts
-
-Some rules are software contracts rather than InvenTree data and therefore may be implemented explicitly.
-
-Examples include:
-
-- `Part.IPN` maps to the database `IPN`;
-- `Part.pk` maps directly to generated `InvenTree PK` as canonical positive decimal text, globally unique across the export; it is not the SQLite primary key;
-- `IPN` is the component identifier used by the generated Altium database;
-- `Part.name` is not an IPN fallback;
-- IPNs are not regenerated from other parameters;
-- IPNs are not parsed to recreate Value, Package, or electrical characteristics;
-- one InvenTree Part produces one component row;
-- Stock Items do not create component rows;
-- Supplier Parts do not create component rows;
-- Manufacturer Parts do not create component rows;
-- one non-empty exported leaf InvenTree category maps to one SQLite component table;
-- the table name is exactly the leaf category name;
-- invalid table names are validation errors and are not automatically rewritten.
-
-Technical Altium fields and conversion rules defined by the architecture are also synchronization contracts.
-
-Do not confuse these fixed conversion rules with component data which belongs in InvenTree.
-
----
-
-## 8. Altium model references
-
-The parameters:
-
-```text
-Altium Symbol
-Altium Footprint
-```
-
-have special meaning to `inventree-sync`.
-
-They generate only `Library Ref`, `Library Path`, `Footprint Ref`, and `Footprint Path`; their original values must not become output columns. Exclusion does not relax required-assignment, reference-format, library-file existence or global model-name uniqueness checks.
-
-Follow the exact format and parsing rules defined in:
-
-```text
-docs/architecture/inventree-sync-design.md
-```
-
-Do not infer missing library names.
-
-Do not substitute:
-
-```text
-Package
-```
-
-for an Altium footprint.
-
-Do not substitute Part names, descriptions, IPNs, or other fields for missing model references.
-
-If a required model reference is missing or malformed, report a validation error instead of silently correcting the source data.
-
----
-
-## 9. Source data must not be silently repaired
-
-Do not silently modify data obtained from InvenTree to make synchronization succeed.
-
-In particular, do not automatically:
-
-- rename IPNs;
-- rename categories;
-- sanitize category names into different SQLite table names;
-- derive missing parameters from IPNs;
-- derive missing parameters from `Part.name`;
-- derive missing parameters from `Part.description`;
-- infer missing symbol libraries;
-- infer missing footprint libraries;
-- normalize engineering units;
-- change SI prefixes;
-- change decimal separators;
-- reinterpret textual parameter values as numbers;
-- replace missing values with arbitrary defaults.
-
-If source data violates a project rule, validation should identify the problem and provide enough context to correct it at the source.
-
----
-
-## 10. Preserve textual parameter data
-
-Unless explicitly required otherwise by the architecture, treat InvenTree parameter values as textual data.
-
-Preserve values such as:
-
-```text
-0603
-1%
-1E3
-10 kΩ
-=example
-```
-
-without unintended numeric conversion or formatting changes.
-
-Use the textual InvenTree parameter representation defined by the architecture.
-
-`PreparedDataset` retains the original source representation. In the transformation layer only, `PreparedTables` formats ordinary parameter values using `Parameter.data` and `ParameterTemplate.units`, never `data_numeric`. Append missing units using the exact metadata spelling and one added space; preserve existing equivalent suffixes (especially `ohm`/`Ω`/`Ω`) without duplication or conversion. Do not format the six technical columns or excluded CAD parameters. Conflicting or ambiguous unit suffixes must raise contextual `ExportValidationError` with Part PK/IPN, template PK/name, original value and configured units; never return partial tables. Supported scalar/suffix recognition and its limits are specified in the architecture document. Missing/empty values remain `None`; whitespace-only optional values remain verbatim even with units.
-
-Missing optional values should remain missing and ultimately map to SQL `NULL`, not placeholder strings such as:
-
-```text
-None
-NaN
-NULL
-```
-
----
-
-## 11. Configuration and secrets
-
-Repository configuration describes synchronization behavior and environment-specific locations.
-
-It must not duplicate the InvenTree component database.
-
-Never commit:
-
-- API tokens;
-- passwords;
-- Authorization headers;
-- session cookies;
-- other credentials.
-
-The default is interactive HTTP Basic Auth: prompt once per command with `input()` and secure `getpass()`, then pass `HTTPBasicAuth` explicitly through retrieval to the client. Keep credentials in runtime memory only, never in TOML, `.env`, Credential Manager, password arguments, logs or persistent tokens. Abort on unavailable secure input rather than accepting echoed password fallback. Python cannot guarantee immediate string erasure. Legacy `auth="token"` may read its configured environment variable, but Basic mode must not require any token or environment variable. Both HTTP and HTTPS are supported; do not add HTTPS enforcement or disable normal TLS certificate verification. Preserve authenticated redirect refusal.
-
-Default invocation is sync. The public CLI has no configuration-path override. Frozen execution reads only `Path(sys.executable).resolve().parent / "config.toml"`; source execution reads repository `tools/config.toml` resolved from the module location. Never search cwd, parent directories or PyInstaller extraction. Missing configuration fails clearly and points to `tools/README.md`. Never create configuration, prompt for setup, or read/search `config.example.toml` at runtime; `tools/config.example.toml` is a tracked manual reference only. All output/library paths remain TOML-configurable and relative to its directory. Internal explicit-path loading remains available for tests.
-
-The tracked `tools/inventree-sync.exe` is the single final Windows executable; no launcher is required. `src/run.py` uses isolated `console.py` ownership detection and a final pause for an Explorer-style owned interactive console, including help/errors, preserving exit codes. Existing terminals, redirected input/output and CI must not pause. Account for the PyInstaller onefile parent/child processes; uncertain detection must not block automation.
-
-Use one ignored `tools/inventree-sync/.venv` for development, tests and builds. `build.ps1` resolves paths from PSScriptRoot, checks Python 3.11+, installs test/build extras, runs the full suite, builds a unique candidate under `build/` from `src/run.py`, then runs real executable smoke tests before atomically replacing `tools/inventree-sync.exe`. Failures preserve the previous executable. Clean only this build's candidate artifacts. No permanent distribution folder or archive is generated. PyInstaller remains build-only. Windows CI builds with Python 3.11 and uploads the final executable directly, without committing. No live production server or credentials are used in tests.
-
-Do not log secrets.
-
-Do not include secrets in generated reports, exceptions, debug dumps, fixtures, or test snapshots.
-
-Example configuration files must contain placeholders only.
-
-Local configuration files containing real server addresses or credentials should remain untracked where appropriate.
-
----
-
-## 12. API implementation
-
-Keep InvenTree HTTP behavior isolated from the rest of the application according to the architecture.
-
-The primary retrieval contract targets InvenTree 1.5.6 / API schema 530. Follow
-`docs/architecture/inventree-sync-design.md`, section 3: fetch all accessible
-categories, resolve the configured root PK, then request Parts with
-`category=<root_pk>&cascade=true&parameters=true` on every page. Do not download
-all Parts and discard those outside scope. Build shared parameter/template
-indexes from actual nested parameters and `template_detail`; conflicting
-template metadata or missing nested data must fail explicitly. Do not add
-automatic fallback or separate parameter/template requests to this path.
-Server-side filtering does not replace local category and Part validation.
-The read-only `inspect` command uses this workflow and must not create SQLite
-output or claim full validation/synchronization.
-
-Raw API JSON must not leak unnecessarily into category, schema, transformation, or SQLite-writing logic.
-
-Use the adapter layer for API-version-specific response structures.
-
-Do not guess undocumented API behavior when it can be determined from the actual server API/schema.
-
-Handle pagination completely.
-
-Do not interpret:
-
-- authorization failure;
-- HTTP failure;
-- malformed pagination;
-- unsupported API schema
-
-as an empty dataset.
-
-Read operations must remain read-only.
-
----
-
-## 13. SQLite generation and publication safety
-
-The generated `.sqlite` is a build artifact. Use only standard-library `sqlite3`; do not introduce backend selection, an ORM, database credentials or an external database-generation driver.
-
-Build a complete snapshot from `PreparedTables`, never incrementally modify the published database. All columns are `TEXT`; the six technical columns are `NOT NULL`, and `IPN` is `PRIMARY KEY COLLATE NOCASE`. `InvenTree PK` is mandatory canonical positive decimal text, globally unique across tables, with no additional index. It is generated only from `Part.pk`, never from a parameter; an ordinary template of the same name is a column conflict. In Altium map it manually as ordinary `InvenTree PK` -> `InvenTree PK`, without brackets or automated DbLib edits. Optional missing values become SQL `NULL`. Preserve prepared strings and units exactly; never reformat them in the writer. Enforce global case-insensitive IPN uniqueness across tables. Direct writer calls must validate manually constructed tables too.
-
-Create a unique staging file in the destination directory, use a transaction with DELETE rollback journaling and normal synchronization, commit and close it, reopen read-only and verify integrity, exact tables/schema/constraints and every stored value. Close verification before `os.replace`. Never publish an incomplete database. Do not add auxiliary user tables or columns.
-
-While holding the destination lock, immediately before `os.replace`, check `<destination>-wal`, `-shm`, and `-journal` without opening the published database. Use a fail-closed check that detects all filesystem entries, including empty files and dangling symlinks, and aborts if inspection fails. Any sidecar blocks publication with `DatabaseError` / CLI code `4`; preserve the destination and external sidecars, and clean up only this operation's staging/lock artifacts. Never checkpoint, repair or automatically remove external SQLite journals.
-
-Acquire an exclusive `<destination>.sync.lock` before staging/publication. Never remove a lock belonging to another active or potentially interrupted process. Recover stale locks manually only after confirming the owning process is stopped, as described in the architecture. Clean up only staging artifacts and locks owned by this operation.
-
-This lock coordinates only `inventree-sync` processes. Sidecar checks cannot detect every external reader or prevent races with non-cooperating applications; do not claim `os.replace` guarantees safe replacement of an actively used database. Close Altium and other SQLite consumers before synchronization. On a blocked publication, let the owning application complete normal transactions/recovery and journal cleanup before retrying; do not recommend deleting journals to bypass the check. Continue reporting Windows replacement-lock failures.
-
-All configured filesystem paths are relative to the TOML directory. `[sync]` output/dblib and `[libraries]` symbols/footprints are required for validate/sync; inspect still supports only `[inventree]` and `[scope]`. No database file or output directory is created by validate.
-
-For validate/sync, `sync.output` must use `.sqlite` or `.sqlite3`, case-insensitively. Reject other extensions with `ConfigError` / CLI code `2` before retrieval or file writes. Preserve the checks preventing output from overwriting the configuration or DbLib file.
-
-Do not force-close Altium or another process holding the database, and do not remove their lock/journal files.
-
-A failed synchronization must leave the previously published database intact.
-
----
-
-## 14. SQL safety
-
-Validate table and field identifiers before using them in SQL.
-
-Do not attempt to pass identifiers through SQL value placeholders.
-
-Use parameterized queries for values.
-
-Never concatenate InvenTree parameter values directly into SQL statements.
-
-Quote validated identifiers with SQLite double quotes, escaping embedded quotes. Retain the English category naming convention, reject sqlite_ internal table names and case-insensitive collisions. Access-specific reserved words and 64-character table/field limits no longer apply. Parameter names allow punctuation and Unicode, but not leading whitespace or control characters. Never silently rename identifiers or truncate values.
-
-If the installed SQLite engine's schema or size limits are exceeded, fail validation or publication clearly.
-
----
-
-## 15. Coding style
-
-Target the Python version specified by the architecture.
-
-Prefer:
-
-- standard library functionality where practical;
-- dataclasses for simple internal models;
-- explicit type hints;
-- `pathlib` for filesystem paths;
-- `logging` for diagnostics;
-- small focused functions;
-- clear exceptions with useful context.
-
-Avoid unnecessary:
-
-- frameworks;
-- ORMs;
-- dependency-injection frameworks;
-- global mutable state;
-- metaprogramming;
-- complex inheritance hierarchies;
-- abstractions with only one trivial implementation.
-
-Do not add a dependency when the standard library reasonably solves the problem.
-
-Keep functions deterministic where practical so that they can be unit tested without network or database access.
-
----
-
-## 16. Error handling
-
-Errors should contain enough context to identify the source object.
-
-Where applicable include:
-
-- Part PK;
-- IPN;
-- category PK;
-- full category path;
-- parameter-template PK;
-- parameter name;
-- affected file path.
-
-Do not hide validation errors behind generic messages such as:
-
-```text
-Invalid data
-```
-
-Expected user/data/API errors should be handled cleanly by the CLI.
-
-Unexpected exceptions may expose traceback information in debug mode, but normal CLI output should remain concise.
-
-Follow the exit-code contract defined by the architecture.
-
----
-
-## 17. Testing
-
-Every implemented behavior should have appropriate automated tests.
-
-Unit tests must not require:
-
-- access to the production InvenTree server;
-- real API credentials;
-- a database ODBC driver;
-- Altium Designer.
-
-Use anonymized fixtures and mocks for these dependencies.
-
-Tests involving the real Windows / ODBC / Altium environment should be clearly separated as integration tests.
-
-When fixing a bug, add a regression test whenever practical.
-
-Do not weaken or delete an existing test merely to make new implementation code pass unless the old test contradicts an explicitly changed requirement.
-
----
-
-## 18. Fixtures
-
-API fixtures must be:
-
-- anonymized;
-- minimal;
-- representative of supported API responses;
-- free of credentials and private production data.
-
-Prefer several small focused fixtures over large raw dumps of the production InvenTree database.
-
-Fixtures should cover edge cases such as pagination, missing values, empty leaf categories being ignored, Parts with different parameter sets, malformed references, and API errors where relevant.
-
----
-
-## 19. Documentation changes
-
-Code changes which alter externally visible behavior, architecture, configuration, or assumptions should update the relevant documentation.
-
-Do not change architecture documentation merely to justify an implementation shortcut.
-
-If a requested implementation requires changing an agreed architectural rule:
-
-1. identify the conflict;
-2. explain why the current design cannot or should not be followed;
-3. propose the smallest necessary architecture change;
-4. keep implementation and documentation changes clearly separated for review where practical.
-
-Historical architecture decisions should not be silently erased.
-
----
-
-## 20. Git and scope discipline
-
-Keep changes focused on the current task.
-
-Before finishing:
-
-- inspect the complete diff;
-- remove accidental or unrelated changes;
-- ensure generated temporary files are not committed;
-- ensure credentials are not committed;
-- run the relevant tests;
-- report any tests which could not be run.
-
-Do not create commits, branches, tags, releases, or pull requests unless the task explicitly requests them or the execution environment specifically requires them.
-
-Do not modify Git history.
-
-Do not force-push.
-
----
-
-## 21. Generated files
-
-Three intentional tracked artifacts are `database/components.sqlite` (verified offline component snapshot), `tools/inventree-sync.exe` and `tools/setup-odbc.exe` (independently verified Windows applications). Keep their tracked status. InvenTree remains the source of truth; the cached snapshot is never synchronized back. Verify integrity, expected schema/content and absence of journal dependencies before tracking an updated database. Do not fabricate a sample database when a production snapshot is unavailable. Failed sync must preserve existing database bytes; a sync API failure reports an existing local database as unchanged and available offline while retaining its failure exit code. Never create commits or push automatically.
-
-Examples of files which are normally generated or local include:
-
-```text
-database/other.sqlite
-database/components.sqlite3
-*.staging.sqlite
-*.staging.sqlite-journal
-*.sync.lock
-tools/config.toml
-```
-
-Do not remove unrelated historical artifacts as part of SQLite implementation or documentation cleanup. SQL fixtures and other intentionally maintained source files must remain trackable.
-
-Respect the repository `.gitignore`.
-
----
-
-## 22. Before completing a task
-
-Before reporting completion:
-
-1. Re-read the original task.
-2. Check the implementation against `AGENTS.md`.
-3. Check it against the relevant architecture and convention documents.
-4. Review the diff for unrelated changes.
-5. Run the relevant tests.
-6. Run formatting/linting/type checks if the repository defines them.
-7. Verify that no secrets or local environment files were added.
-8. Identify any assumptions made.
-9. Identify any requirements which could not be implemented or tested.
-
-Do not report a task as complete if known required behavior is still missing.
-
----
-
-## 23. Final task report
-
-After implementing a task, provide a concise report containing:
-
-- summary of implemented behavior;
-- files created;
-- files modified;
-- tests executed and their results;
-- assumptions made;
-- limitations or unverified environment-specific behavior;
-- architecture discrepancies discovered, if any.
-
-Do not present untested environment-specific behavior as verified.
-
-For example, SQLite unit tests do not prove compatibility with the installed SQLite ODBC driver or Altium DbLib. The user's successful sample-database ODBC test does not verify every generated production table. Clearly distinguish unit-tested behavior from real integration verification.
-
----
-
-## 24. Core principle
-
-When uncertain whether information belongs in repository configuration or should be obtained from InvenTree, use this rule:
-
-> Component-library data belongs in InvenTree.  
-> Synchronization behavior and conversion rules belong in the repository.
-
-Do not create a second component database in configuration files.
-
----
-
-## 25. Independent Windows ODBC setup
-
-`tools/setup-odbc/` is a separate Python 3.11+ project, packaged as the tracked
-Windows x64 console executable `tools/setup-odbc.exe`. It has its own package
-`setup_odbc`, source, tests, `.venv`, build script and GitHub Actions workflow.
-Never import `inventree_sync`, share its environment/build, read configuration
-TOML, contact InvenTree or launch PowerShell at runtime. The prepared executable
-needs neither installed Python nor PowerShell. PowerShell is only a developer
-build tool. Use standard-library ctypes/winreg, no external runtime dependency.
-
-Resolve only the existing `../database/components.sqlite` from the frozen
-executable directory (`Path(sys.executable).resolve().parent`) or equivalent
-source-file layout, never cwd or an arbitrary search. Never generate or repair a
-database, edit Altium files, install/download drivers or write registry keys
-directly. Use documented Unicode Windows ODBC installer APIs. Normal operation
-creates a 64-bit User DSN without administrator privileges.
-
-The public DSN is fixed as `AltiumComponents`. Check the 64-bit Windows host and
-installed 64-bit `SQLite3 ODBC Driver` (`sqlite3odbc.dll`); `--driver-name` may
-select a compatible registered alias only. Inspect driver/DSN registration through
-read-only winreg APIs in both views. List only SQLite driver names/platforms.
-Inspection failures must fail closed, never mean absence. Reject orphaned
-registrations, conflicting System DSNs, incompatible driver/DLL paths and
-32-bit-only DSNs. Matching shared User DSN views are allowed, but do not prove
-driver bitness. No Force override; conflicts require manual ODBC Data Sources
-resolution. Never modify unrelated DSNs.
-
-Create missing User DSNs with `SQLConfigDataSourceW`, NoCreat=1 and no GUI.
-Write the Unicode Database path via `SQLWritePrivateProfileStringW`, with
-`SQLGetConfigMode`/`SQLSetConfigMode` explicitly limiting writes to User scope
-and restoring the prior mode. Existing compatible DSNs change only Database;
-equivalent paths are unchanged. Preserve all other settings.
-Reject non-text or expandable DSN attributes before mutation; profile writes must
-not silently change their registry types during rollback.
-
-Validate the SQLite header and file length, reject all journal sidecar entries
-and inspection failures, and hold a CreateFileW read handle without write/delete
-sharing throughout setup. Read back the full expected DSN before testing it
-through Unicode APIs in odbc32.dll. This driver ignores SQL_ATTR_ACCESS_MODE:
-use its SQLite URI support with `mode=ro&immutable=1` and `NoCreat=1`.
-The immutable assumption is limited to the guarded, journal-free snapshot.
-DSN storage retains a plain absolute path. Execute only harmless schema and
-database-list reads, verify the actual main file, and close every resource.
-Suppress verification connection tracing and reject DSN options that cause
-connection-time side effects. Retain semicolon-path rejection before mutation.
-
-After failed configuration/verification, restore the prior Database attribute,
-including absence, or remove a newly created DSN only when ownership is clear.
-Compare the complete expected state before rollback and verify the result.
-Unexpected concurrent edits must be preserved and incomplete rollback reported
-without hiding the original failure. A named mutex coordinates this tool's
-instances in the same session; installer APIs do not provide atomic transactions
-with external DSN editors. `--check-only` never changes DSNs. The public CLI
-supports only default setup, `--check-only`, `--driver-name` and `--help`;
-exit codes are 0 verified, 1 setup/runtime failure and 2 argument error.
-
-Build independently from src/run.py using onefile/console PyInstaller, a unique
-build/ candidate, unit tests and real executable smoke tests before same-volume
-replacement of tools/setup-odbc.exe. Preserve the old executable on failure and
-clean only owned candidate artifacts. No launcher, permanent dist or ZIP. Keep
-Explorer-owned consoles open for Enter, including help/errors; account for the
-onefile parent/child. Existing terminals, redirected streams, CI and pytest must
-not pause. Tests must cover these policies on the built executable.
-
-Ordinary tests mock ODBC operations and never require an installed driver.
-Native integration is opt-in, uses disposable databases and uniquely named
-temporary User DSNs, and cleans only its resources. Never modify the production
-AltiumComponents DSN or tracked snapshot in tests. Runtime and CI never commit or
-push. Altium placement/mapping verification remains manual.
+Component-library data belongs in InvenTree. Synchronization behavior and conversion rules belong in the repository.

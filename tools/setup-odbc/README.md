@@ -2,6 +2,21 @@
 
 This independent Python 3.11+ project configures the local Windows x64 `AltiumComponents` User DSN for Altium DbLib. The shipped `../setup-odbc.exe` needs neither Python nor PowerShell. It reads no TOML, imports no `inventree_sync` code, contacts no server and never changes SQLite or Altium files. Its environment, tests, executable and CI build are separate from synchronization.
 
+This is the authoritative ODBC implementation reference. See the [end-user guide](../README.md) for normal operation and the [synchronization reference](../inventree-sync/README.md#altium-integration) for snapshot generation and manual DbLib mappings. Setup always targets `database/components.sqlite`; changing synchronization output in TOML does not change this path.
+
+## Command-line interface
+
+From the repository root:
+
+```powershell
+.\tools\setup-odbc.exe
+.\tools\setup-odbc.exe --check-only
+.\tools\setup-odbc.exe --driver-name 'SQLite3 ODBC Driver'
+.\tools\setup-odbc.exe --help
+```
+
+The DSN is fixed as `AltiumComponents`. `--driver-name` accepts only a compatible installed alias; it does not install a driver. `--check-only` verifies existing state without changing it. No Force override, arbitrary database path or DSN-name argument is public. Exit codes are `0` verified, `1` setup/runtime failure and `2` argument error.
+
 ## Layout
 
 ```text
@@ -83,4 +98,4 @@ Optional installed-driver integration:
 
 This uses disposable databases and a unique `AltiumTest-...` User DSN, including create/repeat/move/check, corrupt-schema rollback, restoration of attribute absence, rejected writes even without the file guard, and no-create behavior. It checks unchanged database bytes and cleans only its own DSN. Missing driver means an explicit skip. Neither the production DSN nor the tracked snapshot is changed. Running executable smoke tests independently uses `--setup-executable <absolute-exe-path>`.
 
-The predecessor's setup and rollback guarantees are retained. Differences are the independent Python/executable deployment, native APIs, GNU-style CLI options, Unicode profile writes, explicit tracing suppression and stricter full-state concurrency checks. The old setup script and PowerShell test harnesses are retired. Altium **Connect**, IPN lookup, mappings, symbol placement and footprint transfer remain manual checks; ODBC tests cannot establish them.
+Altium **Connect**, IPN lookup, mappings, symbol placement and footprint transfer remain manual checks; ODBC tests cannot establish them.
